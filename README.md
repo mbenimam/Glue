@@ -1,5 +1,11 @@
 # Glue
 
+[![build](https://github.com/mbenimam/Glue/actions/workflows/build.yml/badge.svg)](https://github.com/mbenimam/Glue/actions/workflows/build.yml)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
+![OpenGL 4.5](https://img.shields.io/badge/OpenGL-4.5-5586a4)
+![tests](https://img.shields.io/badge/unit--test%20checks-5808-brightgreen)
+![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)
+
 **A small OpenGL engine written from scratch, and four real-time graphics apps built on it: a Shadertoy-style shader lab, an SPH fluid simulator, an adaptive quad-mesh simplifier and an interactive GPU path tracer.**
 
 C++20 · OpenGL 4.5 · Premake5 · Dear ImGui · Linux (Wayland and X11) · MIT
