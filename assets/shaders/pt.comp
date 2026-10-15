@@ -9,6 +9,8 @@
 // BSDF sampling by multiple importance sampling, power heuristic. See docs/theory-pathtracer.md.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(rgba32f, binding = 0) uniform image2D uAccum;
+layout(rgba32f, binding = 1) uniform image2D uGuideAlbedo;   // sum of first-hit albedo, a = count
+layout(rgba32f, binding = 2) uniform image2D uGuideNormal;   // sum of first-hit shading normals
 
 struct Node { vec3 lo; uint leftOrFirst; vec3 hi; uint count; };          // matches glue::BvhNode
 struct Tri { vec4 v0; vec4 e1; vec4 e2; vec4 n0; vec4 n1; vec4 n2; };      // e1 = v1 - v0, e2 = v2 - v0
@@ -311,8 +313,10 @@ bool sampleBsdf(Material m, vec3 alb, vec3 n, vec3 ng, vec3 wo, bool frontFace, 
 }
 
 // ---------------------------------------------------------------- integrator
-vec3 radiance(vec3 ro, vec3 rd) {
+// firstAlb / firstN: albedo and shading normal of the camera ray's first hit, for the denoiser.
+vec3 radiance(vec3 ro, vec3 rd, out vec3 firstAlb, out vec3 firstN) {
     vec3 L = vec3(0.0), T = vec3(1.0);
+    firstAlb = vec3(0.0); firstN = vec3(0.0);
     float prevPdf = 0.0;
     bool prevDelta = true;                             // the camera ray counts as "specular"
     vec3 lightN = normalize(cross(uLightU, uLightV));
@@ -320,6 +324,10 @@ vec3 radiance(vec3 ro, vec3 rd) {
     for (int depth = 0; depth <= uMaxBounces; ++depth) {
         Hit h;
         if (!closestHit(ro, rd, h)) { L += T * sky(rd); break; }
+        if (depth == 0) {
+            firstN = h.ns;
+            firstAlb = h.mat >= 0 ? materials[h.mat].albedo.rgb : vec3(0.0);
+        }
         vec3 p = ro + h.t * rd;
         vec3 c = vec3(0.0);
         if (h.mat == -1) {
@@ -408,10 +416,15 @@ void main() {
             ro = uCamPos + uCamRight * (r * cos(phi)) + uCamUp * (r * sin(phi));
             dir = normalize(focus - ro);
         }
-        vec3 L = radiance(ro, dir);
+        vec3 alb, nrm;
+        vec3 L = radiance(ro, dir, alb, nrm);
         if (any(isnan(L)) || any(isinf(L))) L = vec3(0.0);
         vec4 prev = uFrame == 0 ? vec4(0.0) : imageLoad(uAccum, px);
         imageStore(uAccum, px, prev + vec4(L, 1.0));
+        vec4 gA = uFrame == 0 ? vec4(0.0) : imageLoad(uGuideAlbedo, px);
+        imageStore(uGuideAlbedo, px, gA + vec4(alb, 1.0));
+        vec4 gN = uFrame == 0 ? vec4(0.0) : imageLoad(uGuideNormal, px);
+        imageStore(uGuideNormal, px, gN + vec4(nrm, 0.0));
     }
     if (uCountRays != 0) {
         atomicAdd(sRays, gRays);

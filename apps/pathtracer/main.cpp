@@ -8,6 +8,7 @@
 //
 // Flags (on top of --hidden / --frames / --screenshot):
 //   --bench [sec]        1280x720, no vsync, prints samples/s, MRays/s and BVH build times
+//   --log-level L        debug, info, warn or error (also GLUE_LOG_LEVEL)
 //   --size WxH           render resolution instead of the viewport size
 //   --spp N              stop at N samples per pixel (with --render-shot: write it and quit)
 //   --render-shot f.png  the tonemapped render only, without the editor around it
@@ -95,6 +96,7 @@ protected:
             if (a == "--bench") { bench_ = true; if (more && argv[i + 1][0] != '-') benchSeconds_ = std::atof(argv[++i]); }
             else if (a == "--size" && more) std::sscanf(argv[++i], "%dx%d", &fixedW_, &fixedH_);
             else if (a == "--spp" && more) targetSpp_ = std::atoi(argv[++i]);
+            else if (a == "--log-level" && more) Log::setLevel(Log::parse(argv[++i]));
             else if (a == "--render-shot" && more) renderShot_ = argv[++i];
             else if (a == "--spf" && more) samplesPerFrame_ = std::max(1, std::atoi(argv[++i])), spfGiven = true;
             else if (a == "--model" && more) objPath_ = argv[++i];
@@ -120,6 +122,8 @@ protected:
         }
         computePath_ = assets_ + "/shaders/pt.comp";
         if (!loadCompute()) return false;
+        atrousPath_ = assets_ + "/shaders/atrous.comp";
+        if (!loadAtrous()) return false;
         // Scene buffers. The BVH and triangle buffers are replaced by setMesh; spheres and
         // materials have a fixed size and are rewritten whenever the settings change.
         sphereBuf_ = storageBuffer(sizeof(Settings::spheres), nullptr, rhi::BufferUsage::CpuWrite, "pt spheres");
@@ -145,6 +149,7 @@ protected:
         // GPU objects must die while the device is still alive.
         display_.reset(); trace_.reset();
         accum_.reset(); outRt_.reset(); retired_.clear();
+        guideAlb_.reset(); guideNrm_.reset(); denA_.reset(); denB_.reset(); atrous_.reset();
         nodeBuf_.reset(); triBuf_.reset(); sphereBuf_.reset(); matBuf_.reset(); counterBuf_.reset();
     }
 
@@ -182,6 +187,10 @@ protected:
             a.minFilter = a.magFilter = rhi::Filter::Nearest; a.wrap = rhi::Wrap::ClampToEdge;
             a.storage = true; a.debugName = "pt accumulation";
             accum_ = device().createTexture(a);
+            a.debugName = "pt guide albedo"; guideAlb_ = device().createTexture(a);
+            a.debugName = "pt guide normal"; guideNrm_ = device().createTexture(a);
+            a.debugName = "pt denoise A"; denA_ = device().createTexture(a);
+            a.debugName = "pt denoise B"; denB_ = device().createTexture(a);
             // This frame's GUI already refers to the old output image: keep it alive until the next frame.
             if (outRt_) retired_.push_back(std::move(outRt_));
             rhi::RenderTargetDesc o;
@@ -211,6 +220,8 @@ protected:
             if (bench_ && benchStart_ < 0) benchStart_ = nowMs();
             setUniforms(w, h);
             ctx.bindStorageImage(0, *accum_, rhi::Access::ReadWrite);
+            ctx.bindStorageImage(1, *guideAlb_, rhi::Access::ReadWrite);
+            ctx.bindStorageImage(2, *guideNrm_, rhi::Access::ReadWrite);
             for (int i = 0; i < dispatches; ++i) {
                 trace_->set("uFrame", spp_);
                 ctx.dispatch((w + 7) / 8, (h + 7) / 8, 1);
@@ -221,13 +232,39 @@ protected:
             samplesThisWindow_ += (double)dispatches * w * h;
         }
 
-        // Display pass: accumulation -> tonemapped RGBA8 shown in the viewport panel.
+        // Denoise: a-trous passes ping-pong between denA_ and denB_; the last output is shown.
+        // Runs every frame, so changing a denoise slider never restarts the accumulation.
+        rhi::Texture* shown = accum_.get();
+        if (denoisePasses_ > 0 && atrous_) {
+            rhi::Texture* in = accum_.get();
+            for (int i = 0; i < denoisePasses_; ++i) {
+                rhi::Texture* out = (i % 2 == 0) ? denA_.get() : denB_.get();
+                ctx.bindPipeline(*atrous_);
+                atrous_->set("uWidth", w);
+                atrous_->set("uHeight", h);
+                atrous_->set("uStep", 1 << i);
+                atrous_->set("uSigmaC", denSigmaC_);
+                atrous_->set("uSigmaA", denSigmaA_);
+                atrous_->set("uSigmaN", denSigmaN_);
+                ctx.bindStorageImage(0, *in, rhi::Access::ReadWrite);
+                ctx.bindStorageImage(1, *guideAlb_, rhi::Access::ReadWrite);
+                ctx.bindStorageImage(2, *guideNrm_, rhi::Access::ReadWrite);
+                ctx.bindStorageImage(3, *out, rhi::Access::ReadWrite);
+                ctx.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                ctx.barrier(rhi::Barrier::StorageImage);
+                in = out;
+            }
+            shown = in;
+            ctx.barrier(rhi::Barrier::TextureFetch);
+        }
+
+        // Display pass: accumulation (or its denoised copy) -> tonemapped RGBA8 for the viewport.
         rhi::RenderPassDesc pass;
         pass.clearColor = false;    // the triangle covers every pixel
         pass.clearDepth = false;
         ctx.beginRenderPass(outRt_.get(), pass);
         ctx.bindPipeline(*display_);
-        ctx.bindTexture(0, *accum_);
+        ctx.bindTexture(0, *shown);
         display_->set("uExposure", exposure_);
         display_->set("uTonemap", tonemap_);
         ctx.draw(3);
@@ -332,6 +369,20 @@ private:
         d.initialData = data;
         d.debugName = name;
         return device().createBuffer(d);
+    }
+
+    bool loadAtrous() {
+        std::string src;
+        if (!readFile(atrousPath_, src)) { Log::error("cannot read " + atrousPath_); return false; }
+        Log::debug("atrous.comp: " + std::to_string(src.size()) + " bytes read");
+        rhi::ComputePipelineDesc d;
+        d.source = src;
+        d.debugName = "atrous.comp";
+        std::string err;
+        auto p = device().createComputePipeline(d, &err);
+        if (!p) { Log::error("atrous.comp: " + err); return false; }
+        atrous_ = std::move(p);
+        return true;
     }
 
     bool loadCompute() {
@@ -485,6 +536,11 @@ private:
         ui::sliderInt("Roulette from", &s.rrStart, 1, 16);
         ui::sliderInt("Samples/frame", &samplesPerFrame_, 1, 32);
         ui::sliderInt("Stop at spp", &maxSpp_, 0, 16384);
+        ImGui::SeparatorText("Denoise");
+        ui::sliderInt("A-trous passes", &denoisePasses_, 0, 5);
+        ui::slider("Colour sigma", &denSigmaC_, 0.01f, 1.0f, "%.2f");
+        ui::slider("Albedo sigma", &denSigmaA_, 0.01f, 1.0f, "%.2f");
+        ui::slider("Normal sharpness", &denSigmaN_, 1.0f, 256.0f, "%.0f");
         const char* modes[] = {"BSDF sampling", "Light sampling (NEE)", "MIS (power)"};
         ImGui::Combo("Strategy", &s.misMode, modes, 3);
         ui::slider("Clamp", &s.clamp, 0.0f, 50.0f, s.clamp > 0 ? "%.1f" : "off");
@@ -573,7 +629,9 @@ private:
 
     void consolePanel() {
         ImGui::Begin("Console");
-        for (const auto& l : Log::snapshot()) ImGui::TextUnformatted(l.c_str());
+        ui::logLevelSelector();
+        ImGui::Separator();
+        ui::logLines();
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
         ImGui::End();
     }
@@ -611,6 +669,12 @@ private:
     long long computeStamp_ = 0;
     std::unique_ptr<rhi::Pipeline> trace_, display_;
     std::unique_ptr<rhi::Texture> accum_;                     // rgb = sum of samples, a = count
+    std::unique_ptr<rhi::Texture> guideAlb_, guideNrm_;       // sums of first-hit albedo and normal
+    std::unique_ptr<rhi::Texture> denA_, denB_;               // denoiser ping-pong images
+    std::unique_ptr<rhi::Pipeline> atrous_;
+    std::string atrousPath_;
+    int denoisePasses_ = 0;
+    float denSigmaC_ = 0.2f, denSigmaA_ = 0.2f, denSigmaN_ = 32.0f;
     std::unique_ptr<rhi::RenderTarget> outRt_;                // tonemapped RGBA8 shown in the viewport
     std::vector<std::unique_ptr<rhi::RenderTarget>> retired_; // replaced outputs, freed next frame
     std::unique_ptr<rhi::Buffer> nodeBuf_, triBuf_, sphereBuf_, matBuf_, counterBuf_;
