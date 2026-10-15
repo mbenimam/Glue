@@ -500,10 +500,10 @@ private:
         if (ImGui::Button("Step", {70, 0})) { paused_ = true; stepRequested_ = true; }
         ImGui::SameLine();
         if (ImGui::Button("Reset", {70, 0})) needReset = true;
-        ImGui::SliderInt("steps / frame", &stepsPerFrame_, 1, 60);
+        ui::sliderInt("steps / frame", &stepsPerFrame_, 1, 60);
 
         ImGui::SeparatorText("Resolution (resets)");
-        ImGui::SliderInt("particles", &params_.targetCount, 1000, 200000, "%d", ImGuiSliderFlags_Logarithmic);
+        ui::sliderInt("particles", &params_.targetCount, 1000, 200000, "%d", true);
         if (ImGui::IsItemDeactivatedAfterEdit()) needReset = true;
         ui::slider("h / spacing", &params_.hRatio, 1.5f, 3.0f, "%.2f");
         if (ImGui::IsItemDeactivatedAfterEdit()) needReset = true;
@@ -513,14 +513,14 @@ private:
         bool live = false;
         live |= ui::slider("rest density", &params_.restDensity, 100.0f, 3000.0f, "%.0f kg/m3");
         if (ImGui::IsItemDeactivatedAfterEdit()) needReset = true;   // mass is derived from it
-        live |= ImGui::SliderFloat("viscosity mu", &params_.viscosity, 0.0f, 20.0f, "%.2f Pa s", ImGuiSliderFlags_Logarithmic);
+        live |= ui::slider("viscosity mu", &params_.viscosity, 0.0f, 20.0f, "%.2f Pa s");
         live |= ui::slider("XSPH eps", &params_.xsph, 0.0f, 0.5f, "%.3f");
         live |= ui::slider("gravity y", &params_.gravity.y, -20.0f, 5.0f, "%.2f m/s2");
         live |= ui::slider("restitution", &params_.restitution, 0.0f, 1.0f, "%.2f");
 
         ImGui::SeparatorText("Time step");
         float dtMs = params_.dt * 1000.0f;
-        if (ImGui::SliderFloat("dt", &dtMs, 0.05f, 5.0f, "%.3f ms", ImGuiSliderFlags_Logarithmic)) { params_.dt = dtMs * 0.001f; live = true; autoDt_ = false; }
+        if (ui::slider("dt", &dtMs, 0.05f, 5.0f, "%.3f ms", true)) { params_.dt = dtMs * 0.001f; live = true; autoDt_ = false; }
         ImGui::Checkbox("CFL dt on reset", &autoDt_);
         ImGui::SameLine();
         if (ImGui::SmallButton("CFL now")) { params_.dt = cpu_.suggestedDt(); live = true; }
@@ -529,8 +529,8 @@ private:
             ImGui::TextDisabled("Tait stiffness B = %.3g Pa", params_.restDensity * params_.soundSpeed * params_.soundSpeed / 7);
         } else {
             float pct = params_.pciMaxError * 100.0f;
-            if (ImGui::SliderFloat("max density err", &pct, 0.05f, 5.0f, "%.2f %%", ImGuiSliderFlags_Logarithmic)) { params_.pciMaxError = pct * 0.01f; live = true; }
-            live |= ImGui::SliderInt("max iterations", &params_.pciMaxIter, 3, 100);
+            if (ui::slider("max density err", &pct, 0.05f, 5.0f, "%.2f %%", true)) { params_.pciMaxError = pct * 0.01f; live = true; }
+            live |= ui::sliderInt("max iterations", &params_.pciMaxIter, 3, 100);
         }
         if (live) applyLiveParams();
         if (needReset) reset();

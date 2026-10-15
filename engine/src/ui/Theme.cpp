@@ -162,7 +162,7 @@ bool toggle(const char* label, bool* value) {
     return pressed;
 }
 
-bool slider(const char* label, float* value, float lo, float hi, const char* fmt) {
+bool slider(const char* label, float* value, float lo, float hi, const char* fmt, bool logarithmic) {
     ImGuiWindow* win = ImGui::GetCurrentWindow();
     if (win->SkipItems) return false;
     const Palette& p = g_pal;
@@ -181,10 +181,12 @@ bool slider(const char* label, float* value, float lo, float hi, const char* fmt
     const float trackL = pos.x + 7.0f, trackR = pos.x + w - 7.0f, trackY = pos.y + textH + 10.0f;
     if (held && trackR > trackL) {
         float t = std::clamp((ImGui::GetIO().MousePos.x - trackL) / (trackR - trackL), 0.0f, 1.0f);
-        float v = lo + t * (hi - lo);
+        const bool lg = logarithmic && lo > 0.0f && hi > lo;
+        float v = lg ? lo * std::pow(hi / lo, t) : lo + t * (hi - lo);
         if (std::fabs(v - *value) > 1e-7f) { *value = v; changed = true; }
     }
-    const float t = hi > lo ? std::clamp((*value - lo) / (hi - lo), 0.0f, 1.0f) : 0.0f;
+    const bool lgDraw = logarithmic && lo > 0.0f && hi > lo && *value > 0.0f;
+    const float t = hi > lo ? std::clamp(lgDraw ? std::log(*value / lo) / std::log(hi / lo) : (*value - lo) / (hi - lo), 0.0f, 1.0f) : 0.0f;
     const float hov = animate(id, (hovered || held) ? 1.0f : 0.0f);
     ImDrawList* dl = win->DrawList;
     ImGui::RenderText(pos, label, labelEnd);
@@ -198,6 +200,17 @@ bool slider(const char* label, float* value, float lo, float hi, const char* fmt
     dl->AddCircleFilled({x, trackY}, 6.5f + 1.5f * hov, ImGui::GetColorU32(withAlpha(p.accent, 0.20f * hov)), 24);
     dl->AddCircleFilled({x, trackY}, 6.0f, IM_COL32(255, 255, 255, 255), 24);
     return changed;
+}
+
+bool sliderInt(const char* label, int* value, int lo, int hi, const char* fmt, bool logarithmic) {
+    // reuse the float slider: show the rounded value with the int format turned into a float one
+    std::string f(fmt ? fmt : "%d");
+    for (size_t i = f.find("%d"); i != std::string::npos; i = f.find("%d", i + 4)) f.replace(i, 2, "%.0f");
+    float v = (float)*value;
+    const bool changed = slider(label, &v, (float)lo, (float)hi, f.c_str(), logarithmic);
+    const int iv = (int)std::lround(v);
+    if (changed && iv != *value) { *value = iv; return true; }
+    return false;
 }
 
 bool accentButton(const char* label, ImVec2 size) {

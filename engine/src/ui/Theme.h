@@ -33,7 +33,9 @@ void install(const std::string& assetsDir, float scale = 1.0f);
 // iOS-style animated switch with the label on its right. Returns true when toggled.
 bool toggle(const char* label, bool* value);
 // Label on the left, value on the right, a thin track with a round knob underneath.
-bool slider(const char* label, float* value, float lo, float hi, const char* fmt = "%.2f");
+bool slider(const char* label, float* value, float lo, float hi, const char* fmt = "%.2f", bool logarithmic = false);
+// Integer version of slider(): the value snaps to whole numbers; `fmt` is a printf format for an int.
+bool sliderInt(const char* label, int* value, int lo, int hi, const char* fmt = "%d", bool logarithmic = false);
 // A filled accent button (the primary action of a panel).
 bool accentButton(const char* label, ImVec2 size = {0, 0});
 // Small upper-case dim title with a hairline, to group controls.

@@ -481,13 +481,13 @@ private:
         if (ImGui::Button("Reset")) reset();
         ImGui::SameLine();
         if (ImGui::Button("Save PNG")) saveRequested_ = true;
-        ImGui::SliderInt("Max bounces", &s.maxBounces, 1, 32);
-        ImGui::SliderInt("Roulette from", &s.rrStart, 1, 16);
-        ImGui::SliderInt("Samples/frame", &samplesPerFrame_, 1, 32);
-        ImGui::SliderInt("Stop at spp", &maxSpp_, 0, 16384);
+        ui::sliderInt("Max bounces", &s.maxBounces, 1, 32);
+        ui::sliderInt("Roulette from", &s.rrStart, 1, 16);
+        ui::sliderInt("Samples/frame", &samplesPerFrame_, 1, 32);
+        ui::sliderInt("Stop at spp", &maxSpp_, 0, 16384);
         const char* modes[] = {"BSDF sampling", "Light sampling (NEE)", "MIS (power)"};
         ImGui::Combo("Strategy", &s.misMode, modes, 3);
-        ImGui::SliderFloat("Clamp", &s.clamp, 0.0f, 50.0f, s.clamp > 0 ? "%.1f" : "off");
+        ui::slider("Clamp", &s.clamp, 0.0f, 50.0f, s.clamp > 0 ? "%.1f" : "off");
         ImGui::SeparatorText("Display");
         ui::slider("Exposure (EV)", &exposure_, -4.0f, 4.0f);
         const char* tm[] = {"ACES", "Filmic (Hable)", "Clamp"};
@@ -534,7 +534,7 @@ private:
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputText("##obj", &objPath_, ImGuiInputTextFlags_EnterReturnsTrue)) loadModel(objPath_);
         ImGui::SetNextItemWidth(-90);
-        ImGui::SliderInt("##segs", &teapotSegments_, 2, 64, "teapot %d segs");
+        ui::sliderInt("##segs", &teapotSegments_, 2, 64, "teapot %d segs");
         ImGui::SameLine();
         if (ImGui::Button("Rebuild")) setMesh(makeTeapot(teapotSegments_), "Utah teapot");
         ImGui::SeparatorText("Material");

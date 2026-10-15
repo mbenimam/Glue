@@ -279,7 +279,7 @@ private:
                 case UniformParam::Float: ui::slider(p.name.c_str(), &p.value[0], p.lo, p.hi); break;
                 case UniformParam::Int: {
                     int v = (int)p.value[0];
-                    if (ImGui::SliderInt(p.name.c_str(), &v, (int)p.lo, (int)p.hi)) p.value[0] = (float)v;
+                    if (ui::sliderInt(p.name.c_str(), &v, (int)p.lo, (int)p.hi)) p.value[0] = (float)v;
                     break;
                 }
                 case UniformParam::Bool: {

@@ -559,7 +559,7 @@ private:
         const char* names[] = {"Utah teapot", "Bumpy sphere", "Rounded box", "OBJ file"};
         ImGui::SetNextItemWidth(-1);
         ImGui::Combo("##model", &modelIndex_, names, 4);
-        if (modelIndex_ == 0) { ImGui::SetNextItemWidth(-80); ImGui::SliderInt("segments", &segments_, 4, 24); }
+        if (modelIndex_ == 0) { ImGui::SetNextItemWidth(-80); ui::sliderInt("segments", &segments_, 4, 24); }
         if (modelIndex_ == 3) { ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##obj", "path/to/model.obj", &objPath_); }
         static const char* keys[] = {"teapot", "bumpy", "box"};
         if (ImGui::Button("Load", {-1, 0})) load(modelIndex_ < 3 ? keys[modelIndex_] : objPath_);
@@ -574,9 +574,8 @@ private:
     void simplifyPanel() {
         ImGui::Begin("Simplify");
         int maxQ = model_ ? std::max(60, (int)model_->tri.liveFaces() / 2) : 1000;
-        ImGui::TextUnformatted("Target quads");
         ImGui::SetNextItemWidth(-1);
-        ImGui::SliderInt("##target", &target_, 50, maxQ, "%d", ImGuiSliderFlags_Logarithmic);
+        ui::sliderInt("Target quads", &target_, 50, maxQ, "%d", true);
         ImGui::Spacing();
         if (ImGui::Button("Tri -> quad", {-1, 0})) apply(Method::Quads);
         if (ImGui::Button("Simplify: adaptive", {-1, 0})) apply(Method::Adaptive);
