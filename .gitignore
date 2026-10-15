@@ -1,0 +1,10 @@
+build/
+bin/
+obj/
+*.ini
+*.o
+*.a
+.vs/
+.vscode/
+graphify-out/
+compile_commands.json
