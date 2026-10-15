@@ -1,7 +1,11 @@
 // Geometry processing: half-edge structure, discrete differential geometry, quad meshing.
 #include "geometry/Differential.h"
 #include "geometry/HalfEdgeMesh.h"
+#include "geometry/QuadMesh.h"
+#include "geometry/QuadSimplify.h"
+#include "geometry/SpatialGrid.h"
 #include "scene/MeshData.h"
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -308,4 +312,163 @@ TEST(geo_smoothing) {
     CHECK(spread(a) < s0 * 0.5);
     CHECK(spread(b) < s0 * 0.5);
     CHECK(valid(a) && valid(b));
+}
+
+// ---------------------------------------------------------------- spatial grid
+
+TEST(geo_closestPointGrid) {
+    MeshData m = makeTeapot(6);
+    TriangleGrid g;
+    g.build(m.positions, m.indices);
+    Lcg rng{11};
+    int agree = 0;
+    const int n = 300;
+    for (int i = 0; i < n; ++i) {
+        Vec3 q{(rng.below(2000) - 1000) / 600.0f, (rng.below(2000) - 1000) / 600.0f, (rng.below(2000) - 1000) / 600.0f};
+        float best = 1e30f, w[3];
+        for (size_t t = 0; t < m.indices.size(); t += 3) {
+            Vec3 p = closestPointOnTriangle(q, m.positions[m.indices[t]], m.positions[m.indices[t + 1]], m.positions[m.indices[t + 2]], w);
+            best = std::min(best, dot(p - q, p - q));
+        }
+        TriangleGrid::Hit h = g.closest(q);
+        if (std::fabs(h.dist2 - best) <= 1e-6f * std::max(1.0f, best)) ++agree;
+        CHECK_NEAR(h.bary[0] + h.bary[1] + h.bary[2], 1.0, 1e-4);
+    }
+    CHECK(agree == n);                                   // the grid search is exact, not approximate
+}
+
+// ---------------------------------------------------------------- tri -> quad
+
+TEST(geo_triToQuad) {
+    CHECK_NEAR(quadSquareness({0, 0, 0}, {2, 0, 0}, {2, 1, 0}, {0, 1, 0}), 1.0, 1e-6);   // rectangle
+    CHECK(quadSquareness({0, 0, 0}, {2, 0, 0}, {3, 1, 0}, {1, 1, 0}) < 0.75f);              // parallelogram
+    for (int which = 0; which < 2; ++which) {
+        HalfEdgeMesh m = HalfEdgeMesh::fromMeshData(which ? makeTeapot(8) : makeIcosphere(3));
+        MeshStats s0 = m.stats();
+        QuadConvertStats st = trianglesToQuads(m);
+        CHECK(valid(m));
+        MeshStats s1 = m.stats();
+        CHECK(s1.vertices == s0.vertices);               // no vertex added or moved
+        CHECK(s1.euler == s0.euler && s1.boundaryLoops == s0.boundaryLoops);
+        CHECK(st.others == 0);
+        // Closed components have an even triangle count, so crawling pairs every triangle.
+        CHECK(st.triangles == 0);
+        CHECK(st.quads * 2 == s0.faces);
+        CHECK(st.crawledPairs > 0);
+        CHECK(st.pairedQuads > st.quads * 9 / 10);       // greedy pairing does most of the work
+    }
+}
+
+// ---------------------------------------------------------------- simplification
+
+namespace {
+// Sphere with one sharp bump: curvature concentrated in one place.
+MeshData bumpSphere() {
+    MeshData m = makeIcosphere(4, 1.0f);
+    Vec3 c = normalize(Vec3{1, 1, 0});
+    for (auto& p : m.positions) {
+        Vec3 d = normalize(p) - c;
+        p = normalize(p) * (1.0f + 0.3f * std::exp(-dot(d, d) / 0.04f));
+    }
+    m.computeNormals();
+    return m;
+}
+
+struct Prepared {
+    HalfEdgeMesh tri, quads;
+    ReferenceSurface ref;
+    Fitmaps fit;
+};
+Prepared prepare(const MeshData& md) {
+    Prepared p;
+    p.tri = HalfEdgeMesh::fromMeshData(md);
+    p.ref.build(p.tri);
+    p.fit = computeFitmaps(p.ref);
+    p.quads = p.tri;
+    trianglesToQuads(p.quads);
+    return p;
+}
+} // namespace
+
+TEST(geo_quadSimplifyInvariants) {
+    Prepared p = prepare(makeTeapot(8));
+    MeshStats s0 = p.quads.stats();
+    // Boundary vertices must not move: remember their positions.
+    std::set<std::tuple<float, float, float>> boundary;
+    for (int v = 0; v < p.quads.vertexSlots(); ++v)
+        if (p.quads.isBoundaryVertex(v)) boundary.insert({p.quads.position(v).x, p.quads.position(v).y, p.quads.position(v).z});
+    for (int adaptive = 0; adaptive < 2; ++adaptive) {
+        HalfEdgeMesh m = p.quads;
+        QuadSimplifyOptions o;
+        o.targetQuads = 400;
+        o.adaptive = adaptive;
+        QuadSimplifyStats st = simplifyQuadMesh(m, p.ref, &p.fit, o);
+        CHECK(valid(m));
+        MeshStats s = m.stats();
+        CHECK(s.euler == s0.euler && s.boundaryLoops == s0.boundaryLoops && s.components == s0.components);
+        CHECK(st.quadsOut <= 400 && st.quadsOut >= 380);
+        CHECK(s.triangles == 0);
+        CHECK(st.collapses > 1000 && st.rotations > 0 && st.doublets > 0);
+        bool fixed = true;
+        for (int v = 0; v < m.vertexSlots(); ++v)
+            if (m.vertexAlive(v) && m.isBoundaryVertex(v) &&
+                !boundary.count({m.position(v).x, m.position(v).y, m.position(v).z})) fixed = false;
+        CHECK(fixed);
+        // Every vertex stays on the input surface (projection after each move).
+        float worst = 0;
+        for (int v = 0; v < m.vertexSlots(); ++v)
+            if (m.vertexAlive(v)) worst = std::max(worst, p.ref.project(m.position(v)).distance);
+        CHECK(worst < 1e-4f);
+        QuadQualityStats q = measureQuads(m);
+        CHECK(q.percentRegular > 60);
+        CHECK(q.meanQuality > 0.5);
+        SurfaceDistance d = surfaceDistance(m, p.ref, 20000);
+        CHECK(d.hausdorff < 0.06 * d.diagonal);
+        CHECK(0.5 * (d.meanAB + d.meanBA) < 0.005 * d.diagonal);
+    }
+}
+
+TEST(geo_quadSimplifyAdaptivity) {
+    // Adaptive keeps small faces where the S-fitmap is high (the bump), large ones elsewhere;
+    // uniform spreads the same budget evenly.
+    Prepared p = prepare(bumpSphere());
+    std::vector<float> sorted = p.fit.scale;
+    std::sort(sorted.begin(), sorted.end());
+    const float median = sorted[sorted.size() / 2], top = sorted.back();
+    auto areaRatio = [&](bool adaptive) {
+        HalfEdgeMesh m = p.quads;
+        QuadSimplifyOptions o;
+        o.targetQuads = 300;
+        o.adaptive = adaptive;
+        simplifyQuadMesh(m, p.ref, &p.fit, o);
+        // Mean face area on the plain sphere (S near its median) over mean area on the bump.
+        double lo = 0, hi = 0;
+        int nlo = 0, nhi = 0;
+        for (int f = 0; f < m.faceSlots(); ++f) {
+            if (!m.faceAlive(f)) continue;
+            float s = p.ref.sample(p.fit.scale, p.ref.project(m.faceCentroid(f)));
+            double a = length(m.faceVectorArea(f));
+            if (s < median * 1.02f) { lo += a; ++nlo; }
+            else if (s > median + 0.5f * (top - median)) { hi += a; ++nhi; }
+        }
+        return nlo && nhi ? (lo / nlo) / (hi / nhi) : 0.0;
+    };
+    double uniform = areaRatio(false), adaptive = areaRatio(true);
+    CHECK(uniform < 1.5);
+    CHECK(adaptive > 1.5 * uniform);
+}
+
+TEST(geo_triangleQem) {
+    MeshData md = makeTeapot(8);
+    HalfEdgeMesh m = HalfEdgeMesh::fromMeshData(md);
+    ReferenceSurface ref;
+    ref.build(m);
+    MeshStats s0 = m.stats();
+    TriQemStats st = simplifyTrianglesQEM(m, 1000);
+    CHECK(valid(m));
+    CHECK(st.facesOut <= 1000 && st.facesOut >= 990);
+    MeshStats s = m.stats();
+    CHECK(s.euler == s0.euler && s.boundaryLoops == s0.boundaryLoops);
+    SurfaceDistance d = surfaceDistance(m, ref, 20000);
+    CHECK(d.hausdorff < 0.01 * d.diagonal);
 }
