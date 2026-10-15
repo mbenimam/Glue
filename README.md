@@ -42,6 +42,24 @@ C++20 · OpenGL 4.5 · Premake5 · Dear ImGui · Linux (Wayland and X11) · MIT
 
 Each app is a small class that overrides `onInit`, `onUpdate`, `onRender` and `onGui` of `glue::Application`. The window system comes from GLFW 3.4, built from source in the Premake script with both backends: native Wayland when `WAYLAND_DISPLAY` is set, X11 otherwise (`--platform wayland|x11` forces one).
 
+## How each app works
+
+**GlueLab** renders the scene into an offscreen colour and depth target, then runs your shader over it as a full-screen pass.
+
+![One GlueLab frame](docs/assets/diagrams/gluelab-frame.png)
+
+**SPH** finds neighbours with a uniform grid whose cells are one kernel radius wide, so a particle only looks at 27 cells.
+
+![SPH neighbour search](docs/assets/diagrams/sph-neighbours.png)
+
+**PathTracer** adds one sample per pixel per dispatch into a float image and shows the running mean; any change to the camera or the scene resets it.
+
+![Progressive accumulation](docs/assets/diagrams/pathtracer-accumulation.png)
+
+**QuadMesh** simplifies with three local operators that keep every face a quad.
+
+![Quad simplification operators](docs/assets/diagrams/quadmesh-operators.png)
+
 ## Build and run
 
 You need a C++20 compiler, `premake5` and the X11 development headers. `wayland-scanner` is optional: without it the build falls back to X11 only. GLFW, Dear ImGui, glad and stb are vendored in `third_party/`, so there is nothing else to install.
