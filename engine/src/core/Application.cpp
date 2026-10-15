@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace glue {
 
@@ -13,7 +14,11 @@ int Application::framebufferHeight() const { int w, h; window_->framebufferSize(
 bool Application::saveScreenshot(const std::string& path) {
     int w, h;
     window_->framebufferSize(w, h);
-    return gfx::savePngRgba8(path, w, h, device_->context().readColorRgba8(nullptr));
+    std::vector<uint8_t> px = device_->context().readColorRgba8(nullptr);
+    // A backend that cannot read back (the null device) returns a different size: refuse instead of
+    // letting the PNG writer read past the end of the array.
+    if (px.size() != (size_t)w * h * 4) return false;
+    return gfx::savePngRgba8(path, w, h, std::move(px));
 }
 
 int Application::run(int argc, char** argv) {
