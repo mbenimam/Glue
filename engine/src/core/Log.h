@@ -1,10 +1,15 @@
 #pragma once
-#include <cstdio>
+// The engine log, built on spdlog (vendored header-only under third_party/spdlog).
+// Messages go to stderr through spdlog's colour sink and into a ring of recent entries, which
+// the editor console draws coloured by level.
+#define SPDLOG_HEADER_ONLY  // one translation of spdlog per program; every TU sees the same define
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/base_sink.h>
+#include <cstdlib>
+#include <mutex>
 #include <string>
 #include <vector>
-#include <mutex>
-#include <unistd.h>
-#include <cstdlib>
 
 namespace glue {
 
@@ -16,28 +21,59 @@ struct LogEntry {
     std::string text;
 };
 
-// The engine's log: printed to stderr (coloured when it is a terminal) and kept as a ring of
-// recent entries so the editor console can show them, coloured by level.
-// The level comes from GLUE_LOG_LEVEL (debug, info, warn, error; default info) and can be
-// changed at run time with setLevel or the console's level selector.
+namespace detail {
+
+// Keeps the last few hundred messages for the editor console.
+class RingSink final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    static std::vector<LogEntry>& ring() { static std::vector<LogEntry> v; return v; }
+    static std::mutex& ringMutex() { static std::mutex m; return m; }
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        LogLevel level = LogLevel::Info;
+        switch (msg.level) {
+            case spdlog::level::debug: case spdlog::level::trace: level = LogLevel::Debug; break;
+            case spdlog::level::warn: level = LogLevel::Warn; break;
+            case spdlog::level::err: case spdlog::level::critical: level = LogLevel::Error; break;
+            default: break;
+        }
+        std::lock_guard<std::mutex> g(ringMutex());
+        auto& r = ring();
+        r.push_back({level, std::string(msg.payload.data(), msg.payload.size())});
+        if (r.size() > 400) r.erase(r.begin(), r.begin() + 100);
+    }
+    void flush_() override {}
+};
+
+inline spdlog::level::level_enum toSpd(LogLevel l) {
+    switch (l) {
+        case LogLevel::Debug: return spdlog::level::debug;
+        case LogLevel::Warn: return spdlog::level::warn;
+        case LogLevel::Error: return spdlog::level::err;
+        default: return spdlog::level::info;
+    }
+}
+
+} // namespace detail
+
 class Log {
 public:
-    static void write(LogLevel level, const std::string& msg) {
-        if (level < minLevel()) return;
-        if (isatty(fileno(stderr))) std::fprintf(stderr, "%s[%s] %s\033[0m\n", ansi(level), name(level), msg.c_str());
-        else std::fprintf(stderr, "[%s] %s\n", name(level), msg.c_str());
-        std::lock_guard<std::mutex> g(mutex());
-        auto& l = entries();
-        l.push_back({level, msg});
-        if (l.size() > 400) l.erase(l.begin(), l.begin() + 100);
-    }
-    static void debug(const std::string& m) { write(LogLevel::Debug, m); }
-    static void info(const std::string& m) { write(LogLevel::Info, m); }
-    static void warn(const std::string& m) { write(LogLevel::Warn, m); }
-    static void error(const std::string& m) { write(LogLevel::Error, m); }
+    static void write(LogLevel level, const std::string& msg) { logger().log(detail::toSpd(level), msg); }
+    static void debug(const std::string& m) { logger().debug(m); }
+    static void info(const std::string& m) { logger().info(m); }
+    static void warn(const std::string& m) { logger().warn(m); }
+    static void error(const std::string& m) { logger().error(m); }
 
-    static void setLevel(LogLevel l) { minLevel() = l; }
-    static LogLevel level() { return minLevel(); }
+    static void setLevel(LogLevel l) { logger().set_level(detail::toSpd(l)); }
+    static LogLevel level() {
+        switch (logger().level()) {
+            case spdlog::level::debug: case spdlog::level::trace: return LogLevel::Debug;
+            case spdlog::level::warn: return LogLevel::Warn;
+            case spdlog::level::err: case spdlog::level::critical: return LogLevel::Error;
+            default: return LogLevel::Info;
+        }
+    }
     // "debug", "info", "warn" or "error" (also "warning"); anything else keeps info.
     static LogLevel parse(const std::string& s) {
         if (s == "debug") return LogLevel::Debug;
@@ -54,24 +90,23 @@ public:
         }
     }
     static std::vector<LogEntry> snapshot() {
-        std::lock_guard<std::mutex> g(mutex());
-        return entries();
+        std::lock_guard<std::mutex> g(detail::RingSink::ringMutex());
+        return detail::RingSink::ring();
     }
 
 private:
-    static const char* ansi(LogLevel l) {
-        switch (l) {
-            case LogLevel::Debug: return "\033[90m";     // grey
-            case LogLevel::Warn: return "\033[33m";      // yellow
-            case LogLevel::Error: return "\033[31m";     // red
-            default: return "";                          // info: terminal default
-        }
+    static spdlog::logger& logger() {
+        static std::shared_ptr<spdlog::logger> l = [] {
+            auto color = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+            auto ring = std::make_shared<detail::RingSink>();
+            auto lg = std::make_shared<spdlog::logger>("glue", spdlog::sinks_init_list{color, ring});
+            lg->set_pattern("%^[%l]%$ %v");   // %^...%$ colours the whole prefix by level
+            const char* e = std::getenv("GLUE_LOG_LEVEL");
+            lg->set_level(detail::toSpd(parse(e ? e : "info")));
+            return lg;
+        }();
+        return *l;
     }
-    static LogLevel& minLevel() {
-        static LogLevel v = [] { const char* e = std::getenv("GLUE_LOG_LEVEL"); return parse(e ? e : "info"); }();
-        return v;
-    }
-    static std::vector<LogEntry>& entries() { static std::vector<LogEntry> v; return v; }
-    static std::mutex& mutex() { static std::mutex m; return m; }
 };
+
 } // namespace glue

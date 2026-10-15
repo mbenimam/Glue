@@ -100,7 +100,7 @@ project "glue"
     kind "StaticLib"
     files { "engine/src/**.h", "engine/src/**.cpp" }
     includedirs { "engine/src", "third_party/glad/include", "third_party/glfw/include",
-                  "third_party/imgui", "third_party/stb" }
+                  "third_party/imgui", "third_party/stb", "third_party/spdlog/include" }
     links { "glad", "glfw", "imgui" }
 
 local function app(name, dir)
@@ -108,7 +108,7 @@ local function app(name, dir)
         kind "ConsoleApp"
         files { dir .. "/**.cpp", dir .. "/**.h" }
         includedirs { "engine/src", "third_party/glad/include", "third_party/glfw/include",
-                      "third_party/imgui", "third_party/stb" }
+                      "third_party/imgui", "third_party/stb", "third_party/spdlog/include" }
         links { "glue", "imgui", "glfw", "glad" }
         filter "system:linux"
             links { "dl", "pthread", "X11" }
