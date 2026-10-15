@@ -29,6 +29,11 @@ Fonts& fonts();
 // `scale` multiplies sizes and spacing (use 1.5 or 2 on a high-DPI screen; $GLUE_UI_SCALE overrides).
 void install(const std::string& assetsDir, float scale = 1.0f);
 
+// Console helpers: the engine log drawn with one colour per level, and a selector for the level.
+// Set the default with GLUE_LOG_LEVEL=debug (or --log-level debug in the apps).
+void logLevelSelector();
+void logLines();
+
 // ---- controls -------------------------------------------------------------------------------
 // iOS-style animated switch with the label on its right. Returns true when toggled.
 bool toggle(const char* label, bool* value);

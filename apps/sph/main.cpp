@@ -580,7 +580,9 @@ private:
 
     void consolePanel() {
         ImGui::Begin("Console");
-        for (const auto& l : Log::snapshot()) ImGui::TextUnformatted(l.c_str());
+        ui::logLevelSelector();
+        ImGui::Separator();
+        ui::logLines();
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
         ImGui::End();
     }

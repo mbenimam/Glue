@@ -1,4 +1,5 @@
 #include "ui/Theme.h"
+#include "core/Log.h"
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cctype>
@@ -265,6 +266,30 @@ bool listRow(const char* label, bool selected) {
         dl->AddRectFilled({mn.x, mn.y + 5}, {mn.x + 3, mx.y - 5}, ImGui::GetColorU32(p.accent), 2.0f);
     }
     return clicked;
+}
+
+} // namespace glue::ui
+
+namespace glue::ui {
+
+void logLevelSelector() {
+    static const char* names[] = {"debug", "info", "warn", "error"};
+    int level = (int)Log::level();
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::Combo("Level", &level, names, 4)) Log::setLevel((LogLevel)level);
+}
+
+void logLines() {
+    const Palette& pal = palette();
+    if (fonts().code) ImGui::PushFont(fonts().code);
+    for (const LogEntry& e : Log::snapshot()) {
+        ImVec4 c = pal.text;
+        if (e.level == LogLevel::Debug) c = pal.textFaint;
+        else if (e.level == LogLevel::Warn) c = pal.warning;
+        else if (e.level == LogLevel::Error) c = pal.danger;
+        ImGui::TextColored(c, "[%s] %s", Log::name(e.level), e.text.c_str());
+    }
+    if (fonts().code) ImGui::PopFont();
 }
 
 } // namespace glue::ui

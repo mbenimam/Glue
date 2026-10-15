@@ -324,7 +324,7 @@ private:
 
 void glDebug(GLenum, GLenum type, GLuint, GLenum severity, GLsizei len, const char* msg, const void*) {
     if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) return;
-    Log::write(type == GL_DEBUG_TYPE_ERROR ? "gl-error" : "gl", std::string(msg, len));
+    Log::write(type == GL_DEBUG_TYPE_ERROR ? LogLevel::Error : LogLevel::Debug, std::string(msg, len));
 }
 
 platform::Window* g_loadWindow = nullptr;
