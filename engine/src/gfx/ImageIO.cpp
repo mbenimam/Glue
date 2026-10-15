@@ -16,6 +16,16 @@ bool loadImageRgba8(const std::string& path, int& w, int& h, std::vector<uint8_t
     return true;
 }
 
+bool loadImageRgbaF32(const std::string& path, int& w, int& h, std::vector<float>& out) {
+    int c;
+    stbi_set_flip_vertically_on_load(1);
+    float* px = stbi_loadf(path.c_str(), &w, &h, &c, 4);
+    if (!px) return false;
+    out.assign(px, px + (size_t)w * h * 4);
+    stbi_image_free(px);
+    return true;
+}
+
 bool savePngRgba8(const std::string& path, int w, int h, std::vector<uint8_t> px) {
     for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
     stbi_flip_vertically_on_write(1);

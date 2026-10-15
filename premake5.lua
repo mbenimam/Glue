@@ -93,14 +93,15 @@ project "imgui"
         "third_party/imgui/backends/imgui_impl_glfw.cpp",
         "third_party/imgui/backends/imgui_impl_opengl3.cpp",
         "third_party/imgui/misc/cpp/imgui_stdlib.cpp",
+        "third_party/ImGuizmo/ImGuizmo.cpp",
     }
-    includedirs { "third_party/imgui", "third_party/glfw/include" }
+    includedirs { "third_party/imgui", "third_party/ImGuizmo", "third_party/glfw/include" }
 
 project "glue"
     kind "StaticLib"
     files { "engine/src/**.h", "engine/src/**.cpp" }
     includedirs { "engine/src", "third_party/glad/include", "third_party/glfw/include",
-                  "third_party/imgui", "third_party/stb", "third_party/spdlog/include" }
+                  "third_party/imgui", "third_party/ImGuizmo", "third_party/stb", "third_party/spdlog/include" }
     links { "glad", "glfw", "imgui" }
 
 local function app(name, dir)
@@ -108,7 +109,7 @@ local function app(name, dir)
         kind "ConsoleApp"
         files { dir .. "/**.cpp", dir .. "/**.h" }
         includedirs { "engine/src", "third_party/glad/include", "third_party/glfw/include",
-                      "third_party/imgui", "third_party/stb", "third_party/spdlog/include" }
+                      "third_party/imgui", "third_party/ImGuizmo", "third_party/stb", "third_party/spdlog/include" }
         links { "glue", "imgui", "glfw", "glad" }
         filter "system:linux"
             links { "dl", "pthread", "X11" }
