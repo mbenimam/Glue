@@ -37,14 +37,13 @@ protected:
             Log::error("assets/shaders not found (set GLUE_ASSETS)");
             return false;
         }
+        sceneVertexTemplate_ = vs;
+        sceneFragmentSource_ = fs_;
+        std::string err;
+        if (!buildScenePipeline("", scene_, &err)) { Log::error("scene shader: " + err); return false; }
         rhi::GraphicsPipelineDesc sd;
         sd.vertexSource = vs;
-        sd.fragmentSource = fs_;
         sd.vertexLayout = meshVertexLayout();
-        sd.debugName = "scene";
-        std::string err;
-        scene_ = device().createGraphicsPipeline(sd, &err);
-        if (!scene_) { Log::error("scene shader: " + err); return false; }
         sd.fragmentSource = gfs;
         sd.debugName = "grid";
         grid_ = device().createGraphicsPipeline(sd, &err);
@@ -129,6 +128,15 @@ protected:
         scene_->set("uCheckerOn", checker_ ? 1 : 0);
         scene_->set("uHasAlbedo", 0);
         scene_->set("uModel", model);
+        scene_->set("iTime", (float)shaderTime_);
+        for (const auto& p : params_) {            // uniforms declared in the effect's @vertex part
+            switch (p.kind) {
+                case UniformParam::Float: scene_->set(p.name.c_str(), p.value[0]); break;
+                case UniformParam::Int: scene_->set(p.name.c_str(), (int)p.value[0]); break;
+                case UniformParam::Bool: scene_->set(p.name.c_str(), p.value[0] > 0.5f ? 1 : 0); break;
+                case UniformParam::Color: scene_->set(p.name.c_str(), p.value[0], p.value[1], p.value[2]); break;
+            }
+        }
         (useCustom_ ? custom_ : teapot_).draw(ctx);
         if (showGrid_) {
             ctx.bindPipeline(*grid_);
@@ -351,6 +359,20 @@ private:
         if (writeFile(current_, source_)) { stamp_ = fileStamp(current_); Log::info("saved " + current_); }
     }
 
+    // The scene pass: scene.vert with the effect's optional `mainVertex` inserted (see splitEffect).
+    bool buildScenePipeline(const std::string& userVertex, std::unique_ptr<rhi::Pipeline>& out, std::string* err) {
+        rhi::GraphicsPipelineDesc d;
+        d.vertexSource = wrapSceneVertex(sceneVertexTemplate_, userVertex);
+        d.fragmentSource = sceneFragmentSource_;
+        d.vertexLayout = meshVertexLayout();
+        d.debugName = "scene";
+        std::string e;
+        auto p = device().createGraphicsPipeline(d, &e);
+        if (!p) { if (err) *err = e; return false; }
+        out = std::move(p);
+        return true;
+    }
+
     // Builds the full-screen effect pipeline for `userSource`. The same wrapper serves any backend.
     bool buildEffectPipeline(const std::string& userSource, std::unique_ptr<rhi::Pipeline>& out, std::string* err) {
         rhi::GraphicsPipelineDesc d;
@@ -367,8 +389,15 @@ private:
     }
 
     void compileEffect() {
+        const EffectParts parts = splitEffect(source_);
         std::string e;
-        if (buildEffectPipeline(source_, effect_, &e)) {
+        std::unique_ptr<rhi::Pipeline> fx, scene;
+        bool ok = true;
+        if (!buildEffectPipeline(parts.fragment, fx, &e)) ok = false;
+        else if (!buildScenePipeline(parts.vertex, scene, &e)) e = "vertex stage: " + e, ok = false;
+        if (ok) {
+            effect_ = std::move(fx);
+            scene_ = std::move(scene);
             // Keep slider values the user already moved when the same uniform still exists.
             auto fresh = parseUniformParams(source_);
             for (auto& p : fresh)
@@ -377,7 +406,7 @@ private:
             params_ = fresh;
             error_.clear();
         } else {
-            error_ = e;  // previous pipeline stays active
+            error_ = e;  // the previous pipelines stay active
         }
     }
 
@@ -426,6 +455,7 @@ private:
 
     std::vector<std::string> effects_;
     ui::GlslEditor editor_;
+    std::string sceneVertexTemplate_, sceneFragmentSource_;
     std::string current_, source_, error_, objPath_, texPath_;
     std::vector<UniformParam> params_;
     long long stamp_ = 0;

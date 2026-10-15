@@ -91,7 +91,10 @@ void GlslEditor::lex(const std::string& s) {
         if (c == ' ' || c == '\t' || c == '\r') { ++i; continue; }
         if (c == '/' && i + 1 < n && s[i + 1] == '/') {
             int e = i; while (e < n && s[e] != '\n') ++e;
-            push(i, e, Comment); i = e; continue;
+            // "// @vertex" / "// @fragment" switch the effect's stage: show them like directives
+            int w = i + 2; while (w < e && (s[w] == ' ' || s[w] == '\t')) ++w;
+            const bool stage = s.compare(w, 7, "@vertex") == 0 || s.compare(w, 9, "@fragment") == 0;
+            push(i, e, stage ? Preproc : Comment); i = e; continue;
         }
         if (c == '/' && i + 1 < n && s[i + 1] == '*') {
             int e = i + 2; while (e + 1 < n && !(s[e] == '*' && s[e + 1] == '/')) ++e;
