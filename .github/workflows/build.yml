@@ -20,6 +20,8 @@ jobs:
         run: |
           curl -sL https://github.com/premake/premake-core/releases/download/v5.0.0/premake-5.0.0-linux.tar.gz | tar xz
           sudo install -m755 premake5 /usr/local/bin/premake5
+      - name: Layering guard (no GL or GLFW outside the backends)
+        run: ./scripts/check-layering.sh
       - name: Generate and build
         run: |
           premake5 gmake
