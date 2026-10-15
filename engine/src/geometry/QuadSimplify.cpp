@@ -236,8 +236,19 @@ public:
         for (int v = 0; v < m_.vertexSlots(); ++v)
             if (m_.vertexAlive(v)) setInfo(v, ref_.project(m_.position(v)));
         for (int f = 0; f < m_.faceSlots(); ++f) push(f);
-        int guard = 0;
-        while ((int)quads_ > opt_.targetQuads && !heap_.empty() && ++guard < 50 * (int)st_.quadsIn + 1000) {
+        int guard = 0, lastCollapses = -1;
+        gateScale_ = opt_.maxRadiusScale;
+        while ((int)quads_ > opt_.targetQuads && ++guard < 50 * (int)st_.quadsIn + 1000) {
+            if (heap_.empty()) {
+                // Every remaining candidate was refused. Refusals by the M-fitmap are a
+                // preference, not a hard limit: widen the radius test and offer every quad again.
+                // Stop when a whole round brings no collapse.
+                if (st_.collapses == lastCollapses || st_.gateRelaxations >= 24) break;
+                lastCollapses = st_.collapses;
+                if (opt_.adaptive) { gateScale_ *= 1.5f; ++st_.gateRelaxations; }
+                for (int f = 0; f < m_.faceSlots(); ++f) push(f);
+                continue;
+            }
             HeapItem it = heap_.top();
             heap_.pop();
             if (it.face >= (int)stamp_.size() || stamp_[it.face] != it.stamp || !m_.faceAlive(it.face)) continue;
@@ -296,10 +307,13 @@ private:
         *shortDiag = d0 <= d1 ? 0 : 1;
         float key = std::min(d0, d1);
         if (opt_.adaptive && fit_) {
-            // S at the projected centre, interpolated from the corners' cached values.
+            // S at phi(c), the centre projected on the input surface. The corners already lie on
+            // it with their S cached, so S(phi(c)) is taken as the mean of the corner values
+            // (linear interpolation over the face). Projecting the centre itself was measured
+            // too: no better on the test models and about 1.6x slower.
             float s = 0;
-            for (int i = 0; i < 4; ++i) s += info_[m_.from(h[i])].scale;
-            key *= s * 0.25f + opt_.flatBias * meanScale_;
+            for (int i = 0; i < 4; ++i) s += 0.25f * info_[m_.from(h[i])].scale;
+            key *= s + bias_;
         }
         return key;
     }
@@ -352,12 +366,13 @@ private:
         priority(f, &first);
         Vec3 centre = (p[0] + p[1] + p[2] + p[3]) * 0.25f;
         if (opt_.adaptive && fit_) {
-            // Projectability: the face must fit inside the radius where M is still a height field.
+            // Projectability: the face must fit inside the radius over which the input is still a
+            // height field around it (smallest M-fitmap value at its centre and corners).
             float radius = 0;
             for (auto& x : p) radius = std::max(radius, length(x - centre));
-            float mr = 0;
-            for (int i = 0; i < 4; ++i) mr += info_[m_.from(h[i])].maxRadius * 0.25f;
-            if (radius > opt_.maxRadiusScale * mr) { ++st_.blockedByFitmap; return -1; }
+            float mr = ref_.sample(fit_->maxRadius, ref_.project(centre));
+            for (int i = 0; i < 4; ++i) mr = std::min(mr, info_[m_.from(h[i])].maxRadius);
+            if (radius > gateScale_ * mr) { ++st_.blockedByFitmap; return -1; }
         }
         for (int attempt = 0; attempt < 2; ++attempt) {
             int k = attempt == 0 ? first : 1 - first;
@@ -575,7 +590,7 @@ private:
     std::vector<int> region_, pending_;
     std::vector<VertexInfo> info_;
     size_t quads_ = 0, nonQuads_ = 0;
-    float mu_ = 1.0f, meanScale_ = 0.0f, k_ = 1.0f, bias_ = 1.0f;
+    float mu_ = 1.0f, meanScale_ = 0.0f, k_ = 1.0f, bias_ = 1.0f, gateScale_ = 1.0f;
     double sizeIntegral_ = 0;
 };
 

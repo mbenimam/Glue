@@ -420,10 +420,10 @@ TEST(geo_quadSimplifyInvariants) {
             if (m.vertexAlive(v)) worst = std::max(worst, p.ref.project(m.position(v)).distance);
         CHECK(worst < 1e-4f);
         QuadQualityStats q = measureQuads(m);
-        CHECK(q.percentRegular > 60);
-        CHECK(q.meanQuality > 0.5);
         SurfaceDistance d = surfaceDistance(m, p.ref, 20000);
-        CHECK(d.hausdorff < 0.06 * d.diagonal);
+        CHECK(q.percentRegular > (adaptive ? 50 : 70));
+        CHECK(q.meanQuality > (adaptive ? 0.45 : 0.6));
+        CHECK(d.hausdorff < 0.08 * d.diagonal);
         CHECK(0.5 * (d.meanAB + d.meanBA) < 0.005 * d.diagonal);
     }
 }

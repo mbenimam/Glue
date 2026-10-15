@@ -70,6 +70,7 @@ struct QuadSimplifyOptions {
 struct QuadSimplifyStats {
     size_t quadsIn = 0, quadsOut = 0, trianglesOut = 0;
     int collapses = 0, refused = 0, blockedByFitmap = 0;
+    int gateRelaxations = 0;        // times the M-fitmap test was widened (x1.5) to reach the target
     int rotations = 0, doublets = 0, singlets = 0;
     double ms = 0;
 };

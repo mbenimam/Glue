@@ -6,8 +6,8 @@
 //         --> tri->quad --> quad simplification (uniform | adaptive)   vs   triangle QEM
 //
 // Flags (besides --hidden / --frames / --screenshot from Application):
-//   --bench                 print the benchmark tables (docs/quadmesh-benchmarks.md) and exit
-//   --model teapot|bumpy|file.obj   --segments N   --target N
+//   --bench [model]         print the benchmark tables (docs/quadmesh-benchmarks.md) and exit
+//   --model teapot|bumpy|box|file.obj   --segments N   --target N
 //   --run quads|uniform|adaptive|baseline   (may repeat; applied in order at start-up)
 //   --view shaded|curvature|fitmap|error   --compare   --no-wire
 #include "core/Application.h"
@@ -59,6 +59,38 @@ static MeshData makeBumpySphere() {
     return m;
 }
 
+// Box with rounded edges: six flat faces, cylindrical edges and spherical corners. Built as a
+// triangulated cube grid pushed onto the rounded surface (closest point of the inner box,
+// plus `radius` along the direction to the cube point).
+static MeshData makeRoundedBox(int n = 48, float radius = 0.3f) {
+    MeshData m;
+    const float h = 1.0f - radius;
+    for (int axis = 0; axis < 3; ++axis)
+        for (int side = 0; side < 2; ++side) {
+            uint32_t base = (uint32_t)m.positions.size();
+            for (int i = 0; i <= n; ++i)
+                for (int j = 0; j <= n; ++j) {
+                    float q[3];
+                    q[axis] = side ? 1.0f : -1.0f;
+                    q[(axis + 1) % 3] = -1.0f + 2.0f * i / n;
+                    q[(axis + 2) % 3] = -1.0f + 2.0f * j / n;
+                    Vec3 c{std::clamp(q[0], -h, h), std::clamp(q[1], -h, h), std::clamp(q[2], -h, h)};
+                    m.positions.push_back(c + normalize(Vec3{q[0], q[1], q[2]} - c) * radius);
+                }
+            for (int i = 0; i < n; ++i)
+                for (int j = 0; j < n; ++j) {
+                    uint32_t a = base + i * (n + 1) + j, b = a + 1, c = a + n + 1, d = c + 1;
+                    if ((i + j) % 2) m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+                    else m.indices.insert(m.indices.end(), {a, c, d, a, d, b});
+                }
+        }
+    weldVertices(m);
+    if (m.signedVolume() < 0) m.flipWinding();
+    m.normalizeToUnitBox();
+    m.computeNormals();
+    return m;
+}
+
 struct Model {
     std::string name;
     HalfEdgeMesh tri;
@@ -73,6 +105,7 @@ static std::unique_ptr<Model> loadModel(const std::string& which, int segments, 
     std::string name;
     if (which == "teapot") { md = makeTeapot(segments); name = "teapot/" + std::to_string(segments); }
     else if (which == "bumpy") { md = makeBumpySphere(); name = "bumpy sphere"; }
+    else if (which == "box") { md = makeRoundedBox(); name = "rounded box"; }
     else {
         if (!loadObj(which, md, err)) return nullptr;
         weldVertices(md);
@@ -138,13 +171,15 @@ static Result runMethod(const Model& m, Method how, int targetQuads, double* con
 
 // ---------------------------------------------------------------- benchmark
 
-static int runBench() {
+static int runBench(const char* only) {
     struct Case { const char* model; int segments; std::vector<int> targets; };
-    const Case cases[] = {{"teapot", 8, {1000, 500, 250}}, {"teapot", 16, {2000, 1000, 500}}, {"bumpy", 0, {2000, 800}}};
+    const Case cases[] = {{"teapot", 8, {1000, 500, 250}}, {"teapot", 16, {2000, 1000, 500}}, {"bumpy", 0, {2000, 800, 300}},
+                          {"box", 0, {2000, 800, 300}}};
     std::printf("| model | method | target | faces | quads %% | regular %% | quality (mean / min) | angle dev | homeometry | Hausdorff %% | mean dist %% | time ms |\n");
     std::printf("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     std::vector<std::string> prep;
     for (const auto& c : cases) {
+        if (only && !std::strstr(c.model, only)) continue;
         std::string err;
         auto m = loadModel(c.model, c.segments, &err);
         if (!m) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
@@ -315,8 +350,8 @@ protected:
                 runs.push_back(r == "quads" ? Method::Quads : r == "uniform" ? Method::Uniform : r == "baseline" ? Method::Baseline : Method::Adaptive);
             }
         }
-        if (model != "teapot" && model != "bumpy") { objPath_ = model; modelIndex_ = 2; }
-        else modelIndex_ = model == "teapot" ? 0 : 1;
+        modelIndex_ = model == "teapot" ? 0 : model == "bumpy" ? 1 : model == "box" ? 2 : 3;
+        if (modelIndex_ == 3) objPath_ = model;
         load(model);
         for (Method r : runs) apply(r);
         return true;
@@ -470,12 +505,13 @@ private:
 
     void modelPanel() {
         ImGui::Begin("Model");
-        const char* names[] = {"Utah teapot", "Bumpy sphere", "OBJ file"};
+        const char* names[] = {"Utah teapot", "Bumpy sphere", "Rounded box", "OBJ file"};
         ImGui::SetNextItemWidth(-1);
-        ImGui::Combo("##model", &modelIndex_, names, 3);
+        ImGui::Combo("##model", &modelIndex_, names, 4);
         if (modelIndex_ == 0) { ImGui::SetNextItemWidth(-80); ImGui::SliderInt("segments", &segments_, 4, 24); }
-        if (modelIndex_ == 2) { ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##obj", "path/to/model.obj", &objPath_); }
-        if (ImGui::Button("Load", {-1, 0})) load(modelIndex_ == 0 ? "teapot" : modelIndex_ == 1 ? "bumpy" : objPath_);
+        if (modelIndex_ == 3) { ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##obj", "path/to/model.obj", &objPath_); }
+        static const char* keys[] = {"teapot", "bumpy", "box"};
+        if (ImGui::Button("Load", {-1, 0})) load(modelIndex_ < 3 ? keys[modelIndex_] : objPath_);
         if (model_) {
             ImGui::TextDisabled("%s", model_->name.c_str());
             ImGui::Text("%zu triangles, %zu vertices", model_->tri.liveFaces(), model_->ref.positions.size());
@@ -586,7 +622,7 @@ private:
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
-        if (!std::strcmp(argv[i], "--bench")) return runBench();
+        if (!std::strcmp(argv[i], "--bench")) return runBench(i + 1 < argc && argv[i + 1][0] != '-' ? argv[i + 1] : nullptr);
     QuadMeshApp app;
     return app.run(argc, argv);
 }
