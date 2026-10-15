@@ -49,7 +49,9 @@ public:
         glfwSetScrollCallback(win_, [](GLFWwindow* w, double dx, double dy) {
             ImGui_ImplGlfw_ScrollCallback(w, dx, dy);
             auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(w));
-            if (self && self->scroll_ && !ImGui::GetIO().WantCaptureMouse) self->scroll_(dx, dy);
+            // Always forwarded: ImGui counts any hovered window as capturing the mouse, which
+            // swallowed the wheel over the viewport. Apps check their own viewport hover state.
+            if (self && self->scroll_) self->scroll_(dx, dy);
         });
     }
     void imguiNewFrame() override { ImGui_ImplGlfw_NewFrame(); }

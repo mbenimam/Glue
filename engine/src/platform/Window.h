@@ -33,7 +33,7 @@ public:
     // Human-readable name of the window system in use, for logs ("Wayland (native)", "X11", ...).
     virtual std::string platformName() const = 0;
 
-    // Mouse wheel, delivered after the GUI had its chance to take it.
+    // Mouse wheel, delivered on every event. Apps decide from their own hover state.
     using ScrollCallback = std::function<void(double dx, double dy)>;
     virtual void setScrollCallback(ScrollCallback cb) = 0;
 
