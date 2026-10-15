@@ -157,6 +157,41 @@ MeshData makeUvSphere(int rings, int sectors, float radius) {
     return m;
 }
 
+MeshData makeIcosphere(int subdivisions, float radius) {
+    const float t = (1.0f + std::sqrt(5.0f)) * 0.5f;
+    MeshData m;
+    m.positions = {{-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0}, {0, -1, t}, {0, 1, t},
+                   {0, -1, -t}, {0, 1, -t}, {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
+    m.indices = {0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2,
+                 10, 7, 6, 7, 1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11,
+                 6, 2, 10, 8, 6, 7, 9, 8, 1};
+    for (auto& p : m.positions) p = normalize(p);
+    for (int s = 0; s < subdivisions; ++s) {
+        std::map<std::pair<uint32_t, uint32_t>, uint32_t> mid;
+        auto midpoint = [&](uint32_t a, uint32_t b) {
+            auto key = std::make_pair(std::min(a, b), std::max(a, b));
+            auto it = mid.find(key);
+            if (it != mid.end()) return it->second;
+            uint32_t id = (uint32_t)m.positions.size();
+            m.positions.push_back(normalize(m.positions[a] + m.positions[b]));
+            mid.emplace(key, id);
+            return id;
+        };
+        std::vector<uint32_t> next;
+        for (size_t i = 0; i < m.indices.size(); i += 3) {
+            uint32_t a = m.indices[i], b = m.indices[i + 1], c = m.indices[i + 2];
+            uint32_t ab = midpoint(a, b), bc = midpoint(b, c), ca = midpoint(c, a);
+            next.insert(next.end(), {a, ab, ca, b, bc, ab, c, ca, bc, ab, bc, ca});
+        }
+        m.indices = std::move(next);
+    }
+    for (auto& p : m.positions) p = p * radius;
+    if (m.signedVolume() < 0) m.flipWinding();
+    m.computeNormals();
+    m.uvs.assign(m.positions.size(), Vec2{});
+    return m;
+}
+
 MeshData makePlane(float h, float y) {
     MeshData m;
     m.positions = {{-h, y, -h}, {h, y, -h}, {h, y, h}, {-h, y, h}};
