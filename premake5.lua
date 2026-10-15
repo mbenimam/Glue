@@ -93,6 +93,13 @@ for _, dir in ipairs(os.matchdirs("apps/*")) do
     app(path.getname(dir), dir)
 end
 
+-- The SPH app parallelises its CPU solver with OpenMP (GCC/Clang: -fopenmp at compile and link).
+project "sph"
+    filter "system:linux"
+        buildoptions { "-fopenmp" }
+        linkoptions { "-fopenmp" }
+    filter {}
+
 project "tests"
     kind "ConsoleApp"
     files { "tests/**.cpp" }
