@@ -1,0 +1,6 @@
+third_party/
+build/
+bin/
+.claude/
+docs/assets/
+assets/effects/

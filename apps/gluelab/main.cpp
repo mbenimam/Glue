@@ -7,13 +7,11 @@
 #include "core/Assets.h"
 #include "core/File.h"
 #include "core/Log.h"
-#include "gfx/Shader.h"
+#include "gfx/ImageIO.h"
 #include "gfx/ShaderToy.h"
-#include "gfx/Texture.h"
+#include "rhi/Rhi.h"
 #include "scene/Camera.h"
 #include "scene/Mesh.h"
-#include <GLFW/glfw3.h>
-#include <stb_image_write.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -37,15 +35,22 @@ protected:
             Log::error("assets/shaders not found (set GLUE_ASSETS)");
             return false;
         }
-        if (!scene_.compileGraphics(vs, fs_) || !grid_.compileGraphics(vs, gfs)) {
-            Log::error("scene shader: " + scene_.error() + grid_.error());
-            return false;
-        }
-        fullscreen_.compileGraphics(kShadertoyVertex, wrapShadertoy("void mainImage(out vec4 c,in vec2 p){c=vec4(1,0,1,1);}"));
-        glCreateVertexArrays(1, &emptyVao_);
+        rhi::GraphicsPipelineDesc sd;
+        sd.vertexSource = vs;
+        sd.fragmentSource = fs_;
+        sd.vertexLayout = meshVertexLayout();
+        sd.debugName = "scene";
+        std::string err;
+        scene_ = device().createGraphicsPipeline(sd, &err);
+        if (!scene_) { Log::error("scene shader: " + err); return false; }
+        sd.fragmentSource = gfs;
+        sd.debugName = "grid";
+        grid_ = device().createGraphicsPipeline(sd, &err);
+        if (!grid_) { Log::error("grid shader: " + err); return false; }
+        buildEffectPipeline("void mainImage(out vec4 c,in vec2 p){c=vec4(1,0,1,1);}", fallback_, nullptr);
 
-        teapot_.upload(makeTeapot(16));
-        plane_.upload(makePlane(40.0f, -0.5f));
+        teapot_.upload(device(), makeTeapot(16));
+        plane_.upload(device(), makePlane(40.0f, -0.5f));
         makeNoiseTexture();
         refreshEffectList();
 
@@ -61,6 +66,16 @@ protected:
     }
 
     void onUpdate(float dt) override {
+        // Render targets follow the viewport panel size of the previous frame. They are recreated here,
+        // before the GUI of this frame refers to their textures, never between onGui and the draw.
+        int tw = std::max(vpW_, 16), th = std::max(vpH_, 16);
+        if (!sceneRt_ || sceneRt_->width() != tw || sceneRt_->height() != th) {
+            rhi::RenderTargetDesc d;
+            d.width = tw; d.height = th; d.colorFormat = rhi::Format::RGBA16F; d.depth = true; d.debugName = "scene";
+            sceneRt_ = device().createRenderTarget(d);
+            d.colorFormat = rhi::Format::RGBA8; d.depth = false; d.debugName = "effect output";
+            outRt_ = device().createRenderTarget(d);
+        }
         // Hot reload: re-read the file when it changes on disk and the editor has no unsaved edits.
         if (!current_.empty() && !dirty_ && (frame() % 30 == 0)) {
             long long s = fileStamp(current_);
@@ -72,12 +87,10 @@ protected:
     }
 
     void onShutdown() override {
-        // GL objects must die while the context is still alive.
-        scene_.destroy(); grid_.destroy(); effect_.destroy(); fullscreen_.destroy();
-        teapot_.destroy(); custom_.destroy(); plane_.destroy(); user_.destroy();
-        sceneFbo_.destroy(); outFbo_.destroy();
-        if (emptyVao_) glDeleteVertexArrays(1, &emptyVao_);
-        emptyVao_ = 0;
+        // GPU objects must die while the device is still alive.
+        scene_.reset(); grid_.reset(); effect_.reset(); fallback_.reset();
+        teapot_.release(); custom_.release(); plane_.release(); user_.reset();
+        sceneRt_.reset(); outRt_.reset();
     }
 
     void onScroll(double, double dy) override {
@@ -96,44 +109,43 @@ protected:
     }
 
     void onRender() override {
-        int w = std::max(vpW_, 16), h = std::max(vpH_, 16);
-        sceneFbo_.resize(w, h, GL_RGBA16F);
-        outFbo_.resize(w, h, GL_RGBA8);
+        int w = sceneRt_->width(), h = sceneRt_->height();
+        rhi::CommandContext& ctx = context();
 
         // 1. Scene pass
-        sceneFbo_.bind();
-        glEnable(GL_DEPTH_TEST);
-        glClearColor(0.05f, 0.06f, 0.08f, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        rhi::RenderPassDesc scenePass;
+        scenePass.clearColorValue[0] = 0.05f; scenePass.clearColorValue[1] = 0.06f; scenePass.clearColorValue[2] = 0.08f;
+        ctx.beginRenderPass(sceneRt_.get(), scenePass);
         Mat4 vp = camera_.projection((float)w / h) * camera_.view();
         Vec3 cam = camera_.position();
         Mat4 model = rotateY(modelSpin_ ? (float)shaderTime_ * 0.4f : 0.0f);
-        scene_.bind();
-        scene_.set("uViewProj", vp);
-        scene_.set("uCameraPos", cam);
-        scene_.set("uTime", (float)shaderTime_);
-        scene_.set("uBase", baseColor_[0], baseColor_[1], baseColor_[2]);
-        scene_.set("uCheckerOn", checker_ ? 1 : 0);
-        scene_.set("uHasAlbedo", 0);
-        scene_.set("uModel", model);
-        (useCustom_ ? custom_ : teapot_).draw();
+        ctx.bindPipeline(*scene_);
+        scene_->set("uViewProj", vp);
+        scene_->set("uCameraPos", cam);
+        scene_->set("uTime", (float)shaderTime_);
+        scene_->set("uBase", baseColor_[0], baseColor_[1], baseColor_[2]);
+        scene_->set("uCheckerOn", checker_ ? 1 : 0);
+        scene_->set("uHasAlbedo", 0);
+        scene_->set("uModel", model);
+        (useCustom_ ? custom_ : teapot_).draw(ctx);
         if (showGrid_) {
-            grid_.bind();
-            grid_.set("uViewProj", vp);
-            grid_.set("uCameraPos", cam);
-            grid_.set("uModel", Mat4{});
-            plane_.draw();
+            ctx.bindPipeline(*grid_);
+            grid_->set("uViewProj", vp);
+            grid_->set("uCameraPos", cam);
+            grid_->set("uModel", Mat4{});
+            plane_.draw(ctx);
         }
+        ctx.endRenderPass();
 
-        // 2. Effect pass
-        outFbo_.bind();
-        glDisable(GL_DEPTH_TEST);
-        glClear(GL_COLOR_BUFFER_BIT);
-        Shader& fx = effect_.valid() ? effect_ : fullscreen_;
-        fx.bind();
-        glBindTextureUnit(0, sceneFbo_.colorTexture());
-        user_.bind(1);
-        glBindTextureUnit(2, sceneFbo_.depthTexture());
+        // 2. Effect pass: one full-screen triangle, the scene colour as iChannel0 and its depth as iChannel2
+        rhi::RenderPassDesc fxPass;
+        fxPass.clearDepth = false;
+        ctx.beginRenderPass(outRt_.get(), fxPass);
+        rhi::Pipeline& fx = effect_ ? *effect_ : *fallback_;
+        ctx.bindPipeline(fx);
+        ctx.bindTexture(0, sceneRt_->color());
+        ctx.bindTexture(1, *user_);
+        ctx.bindTexture(2, *sceneRt_->depth());
         fx.set("iResolution", (float)w, (float)h, 1.0f);
         fx.set("iTime", (float)shaderTime_);
         fx.set("iTimeDelta", deltaTime());
@@ -147,18 +159,13 @@ protected:
                 case UniformParam::Color: fx.set(p.name.c_str(), p.value[0], p.value[1], p.value[2]); break;
             }
         }
-        glBindVertexArray(emptyVao_);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        ctx.draw(3);
         if (!viewShot_.empty() && (int)frame() == viewShotFrame_) {
             // Only the effect's output, without the editor chrome: used for README images.
-            auto px = outFbo_.readback();
-            for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
-            stbi_flip_vertically_on_write(1);
-            stbi_write_png(viewShot_.c_str(), w, h, 4, px.data(), w * 4);
+            gfx::savePngRgba8(viewShot_, w, h, ctx.readColorRgba8(outRt_.get()));
             Log::info("view screenshot: " + viewShot_);
         }
-        Framebuffer::unbind();
-        glEnable(GL_DEPTH_TEST);
+        ctx.endRenderPass();
     }
 
 private:
@@ -216,7 +223,7 @@ private:
         ImGui::TextUnformatted("iChannel1 texture");
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputText("##tex", &texPath_, ImGuiInputTextFlags_EnterReturnsTrue)) {
-            if (!user_.loadFile(texPath_)) makeNoiseTexture();
+            if (!loadUserTexture(texPath_)) makeNoiseTexture();
         }
         ImGui::End();
     }
@@ -284,8 +291,8 @@ private:
         ImVec2 sz = ImGui::GetContentRegionAvail();
         vpW_ = (int)sz.x; vpH_ = (int)sz.y;
         ImVec2 origin = ImGui::GetCursorScreenPos();
-        if (outFbo_.colorTexture())
-            ImGui::Image((ImTextureID)(intptr_t)outFbo_.colorTexture(), sz, {0, 1}, {1, 0});
+        if (outRt_)
+            ImGui::Image((ImTextureID)(intptr_t)outRt_->color().imguiId(), sz, {0, 1}, {1, 0});
         viewportHovered_ = ImGui::IsItemHovered();
         ImGuiIO& io = ImGui::GetIO();
         if (viewportHovered_ && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) camera_.rotate(io.MouseDelta.x, io.MouseDelta.y);
@@ -327,19 +334,33 @@ private:
         if (writeFile(current_, source_)) { stamp_ = fileStamp(current_); Log::info("saved " + current_); }
     }
 
+    // Builds the full-screen effect pipeline for `userSource`. The same wrapper serves any backend.
+    bool buildEffectPipeline(const std::string& userSource, std::unique_ptr<rhi::Pipeline>& out, std::string* err) {
+        rhi::GraphicsPipelineDesc d;
+        d.vertexSource = kShadertoyVertex;
+        d.fragmentSource = wrapShadertoy(userSource);
+        d.depth.test = false;
+        d.depth.write = false;
+        d.debugName = "effect";
+        std::string e;
+        auto p = device().createGraphicsPipeline(d, &e);
+        if (!p) { if (err) *err = e; return false; }
+        out = std::move(p);
+        return true;
+    }
+
     void compileEffect() {
-        Shader next;
-        if (next.compileGraphics(kShadertoyVertex, wrapShadertoy(source_))) {
+        std::string e;
+        if (buildEffectPipeline(source_, effect_, &e)) {
             // Keep slider values the user already moved when the same uniform still exists.
             auto fresh = parseUniformParams(source_);
             for (auto& p : fresh)
                 for (const auto& old : params_)
                     if (old.name == p.name && old.kind == p.kind) { for (int i = 0; i < 3; ++i) p.value[i] = old.value[i]; }
             params_ = fresh;
-            effect_.compileGraphics(kShadertoyVertex, wrapShadertoy(source_));
             error_.clear();
         } else {
-            error_ = next.error();  // previous program stays active
+            error_ = e;  // previous pipeline stays active
         }
     }
 
@@ -348,28 +369,42 @@ private:
         MeshData m; std::string err;
         if (!loadObj(path, m, &err)) { Log::warn("OBJ: " + err); return; }
         m.normalizeToUnitBox();
-        custom_.upload(m);
+        custom_.upload(device(), m);
         useCustom_ = true;
         Log::info("loaded " + path + ": " + std::to_string(m.triangleCount()) + " triangles");
     }
 
+    void setUserPixels(int w, int h, const uint8_t* px) {
+        rhi::TextureDesc d;
+        d.width = w; d.height = h; d.format = rhi::Format::RGBA8; d.mipmaps = true;
+        d.initialData = px; d.debugName = "iChannel1";
+        user_ = device().createTexture(d);
+    }
+
+    bool loadUserTexture(const std::string& path) {
+        int w, h;
+        std::vector<uint8_t> px;
+        if (!gfx::loadImageRgba8(path, w, h, px)) { Log::warn("texture not loaded: " + path); return false; }
+        setUserPixels(w, h, px.data());
+        return true;
+    }
+
     void makeNoiseTexture() {
-        std::vector<unsigned char> px(64 * 64 * 4);
+        std::vector<uint8_t> px(64 * 64 * 4);
         unsigned s = 12345u;
         for (size_t i = 0; i < px.size(); i += 4) {
             s = s * 1664525u + 1013904223u;
-            unsigned char v = (unsigned char)(s >> 24);
+            uint8_t v = (uint8_t)(s >> 24);
             px[i] = px[i + 1] = px[i + 2] = v; px[i + 3] = 255;
         }
-        user_.upload(64, 64, 4, px.data());
+        setUserPixels(64, 64, px.data());
     }
 
     std::string assets_;
-    Shader scene_, grid_, effect_, fullscreen_;
+    std::unique_ptr<rhi::Pipeline> scene_, grid_, effect_, fallback_;
     Mesh teapot_, custom_, plane_;
-    Texture2D user_;
-    Framebuffer sceneFbo_, outFbo_;
-    GLuint emptyVao_ = 0;
+    std::unique_ptr<rhi::Texture> user_;
+    std::unique_ptr<rhi::RenderTarget> sceneRt_, outRt_;
     OrbitCamera camera_{{0, 0.0f, 0}, 0.6f, 0.3f, 3.1f};
 
     std::vector<std::string> effects_;

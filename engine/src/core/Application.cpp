@@ -1,76 +1,59 @@
 #include "core/Application.h"
 #include "core/Log.h"
-#include <glad/gl.h>
-#include <GLFW/glfw3.h>
+#include "gfx/ImageIO.h"
 #include <imgui.h>
-#include <backends/imgui_impl_glfw.h>
-#include <backends/imgui_impl_opengl3.h>
-#include <stb_image_write.h>
-#include <cstring>
 #include <cstdlib>
-#include <vector>
+#include <cstring>
 
 namespace glue {
 
-void scrollThunk(GLFWwindow* w, double dx, double dy) {
-    ImGui_ImplGlfw_ScrollCallback(w, dx, dy);
-    auto* app = static_cast<Application*>(glfwGetWindowUserPointer(w));
-    if (app && !ImGui::GetIO().WantCaptureMouse) app->onScroll(dx, dy);
-}
+int Application::framebufferWidth() const { int w, h; window_->framebufferSize(w, h); return w; }
+int Application::framebufferHeight() const { int w, h; window_->framebufferSize(w, h); return h; }
 
-static void glDebug(GLenum, GLenum type, GLuint, GLenum severity, GLsizei len, const char* msg, const void*) {
-    if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) return;
-    Log::write(type == GL_DEBUG_TYPE_ERROR ? "gl-error" : "gl", std::string(msg, len));
-}
-
-int Application::framebufferWidth() const { int w, h; glfwGetFramebufferSize(window_, &w, &h); return w; }
-int Application::framebufferHeight() const { int w, h; glfwGetFramebufferSize(window_, &w, &h); return h; }
-
-bool Application::saveScreenshot(const std::string& path) const {
-    int w = framebufferWidth(), h = framebufferHeight();
-    std::vector<unsigned char> px((size_t)w * h * 4);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    stbi_flip_vertically_on_write(1);
-    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
-    return stbi_write_png(path.c_str(), w, h, 4, px.data(), w * 4) != 0;
+bool Application::saveScreenshot(const std::string& path) {
+    int w, h;
+    window_->framebufferSize(w, h);
+    return gfx::savePngRgba8(path, w, h, device_->context().readColorRgba8(nullptr));
 }
 
 int Application::run(int argc, char** argv) {
-    // Common flags: --frames N (exit after N frames), --screenshot file.png (written on the last frame).
+    // Common flags: --frames N (exit after N frames), --screenshot file.png (written on the last frame),
+    // --hidden, --platform x11|wayland (window system), --backend gl|null (graphics API).
     int maxFrames = -1;
-    std::string shot, platform;
+    std::string shot, platformName;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc) maxFrames = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--screenshot") && i + 1 < argc) shot = argv[++i];
         else if (!std::strcmp(argv[i], "--hidden")) cfg_.hidden = true;
-        else if (!std::strcmp(argv[i], "--platform") && i + 1 < argc) platform = argv[++i];
+        else if (!std::strcmp(argv[i], "--platform") && i + 1 < argc) platformName = argv[++i];
+        else if (!std::strcmp(argv[i], "--backend") && i + 1 < argc) {
+            std::string b = argv[++i];
+            if (b == "gl" || b == "opengl") cfg_.backend = rhi::Backend::OpenGL;
+            else if (b == "vulkan") cfg_.backend = rhi::Backend::Vulkan;
+            else if (b == "d3d12") cfg_.backend = rhi::Backend::D3D12;
+            else if (b == "null") cfg_.backend = rhi::Backend::Null;
+        }
     }
     if (!shot.empty() && maxFrames < 0) maxFrames = 5;
 
-    // Window-system backend: by default GLFW picks Wayland when WAYLAND_DISPLAY is set, else X11.
-    if (platform == "x11") glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
-    else if (platform == "wayland") glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
-    glfwSetErrorCallback([](int code, const char* msg) { Log::error("glfw " + std::to_string(code) + ": " + msg); });
-    if (!glfwInit()) { Log::error("glfwInit failed"); return 1; }
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
-    glfwWindowHint(GLFW_VISIBLE, cfg_.hidden ? GLFW_FALSE : GLFW_TRUE);
-    window_ = glfwCreateWindow(cfg_.width, cfg_.height, cfg_.title.c_str(), nullptr, nullptr);
-    if (!window_) { Log::error("could not create a 4.5 core OpenGL window"); glfwTerminate(); return 1; }
-    glfwMakeContextCurrent(window_);
-    glfwSwapInterval(cfg_.vsync && shot.empty() ? 1 : 0);
-    if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) { Log::error("glad failed"); return 1; }
-    glEnable(GL_DEBUG_OUTPUT);
-    glDebugMessageCallback(glDebug, nullptr);
-    {
-        int p = glfwGetPlatform();
-        Log::info(std::string("window system: ") + (p == GLFW_PLATFORM_WAYLAND ? "Wayland (native)" : p == GLFW_PLATFORM_X11 ? "X11" : "other"));
-    }
-    Log::info(std::string("GL ") + (const char*)glGetString(GL_VERSION) + " | " + (const char*)glGetString(GL_RENDERER));
+    std::string err;
+    platform::WindowDesc wd;
+    wd.title = cfg_.title;
+    wd.width = cfg_.width;
+    wd.height = cfg_.height;
+    wd.visible = !cfg_.hidden;
+    wd.preferredPlatform = platformName;
+    wd.api = cfg_.backend == rhi::Backend::OpenGL ? platform::GraphicsApi::OpenGL
+           : cfg_.backend == rhi::Backend::Vulkan ? platform::GraphicsApi::Vulkan
+           : cfg_.backend == rhi::Backend::D3D12 ? platform::GraphicsApi::D3D12 : platform::GraphicsApi::None;
+    window_ = platform::createWindow(wd, &err);
+    if (!window_) { Log::error("window: " + err); return 1; }
+    device_ = rhi::Device::create(cfg_.backend, window_.get(), &err);
+    if (!device_) { Log::error("graphics device: " + err); return 1; }
+    device_->setVsync(cfg_.vsync && shot.empty());
+    const auto& info = device_->info();
+    Log::info("window system: " + window_->platformName());
+    Log::info(std::string(rhi::backendName(info.backend)) + " " + info.apiVersion + " | " + info.renderer);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -80,49 +63,45 @@ int Application::run(int argc, char** argv) {
     ImGui::StyleColorsDark();
     ImGuiStyle& st = ImGui::GetStyle();
     st.WindowRounding = 4; st.FrameRounding = 3; st.TabRounding = 3; st.FramePadding = {8, 4};
-    ImGui_ImplGlfw_InitForOpenGL(window_, false);
-    ImGui_ImplOpenGL3_Init("#version 450");
-    glfwSetWindowUserPointer(window_, this);
-    glfwSetMouseButtonCallback(window_, ImGui_ImplGlfw_MouseButtonCallback);
-    glfwSetCursorPosCallback(window_, ImGui_ImplGlfw_CursorPosCallback);
-    glfwSetKeyCallback(window_, ImGui_ImplGlfw_KeyCallback);
-    glfwSetCharCallback(window_, ImGui_ImplGlfw_CharCallback);
-    glfwSetScrollCallback(window_, scrollThunk);
+    window_->imguiInit();
+    device_->imguiInit();
+    window_->setScrollCallback([this](double dx, double dy) { onScroll(dx, dy); });
 
     int rc = 0;
     if (!onInit(argc, argv)) rc = 1;
-    double last = glfwGetTime();
-    while (rc == 0 && !quit_ && !glfwWindowShouldClose(window_)) {
-        glfwPollEvents();
-        double now = glfwGetTime();
+    double last = window_->timeSeconds();
+    while (rc == 0 && !quit_ && !window_->shouldClose()) {
+        window_->pollEvents();
+        double now = window_->timeSeconds();
         dt_ = (float)(now - last); last = now; time_ = now;
         onUpdate(dt_);
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
+        device_->imguiNewFrame();
+        window_->imguiNewFrame();
         ImGui::NewFrame();
         onGui();
         ImGui::Render();
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, framebufferWidth(), framebufferHeight());
-        glClearColor(0.07f, 0.07f, 0.09f, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        onRender();
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        onRender();   // offscreen passes first, then the window's back buffer carries the GUI
+        rhi::RenderPassDesc pass;
+        pass.clearColorValue[0] = 0.07f; pass.clearColorValue[1] = 0.07f; pass.clearColorValue[2] = 0.09f;
+        context().beginRenderPass(nullptr, pass);
+        device_->imguiRender();
         ++frame_;
-        bool last_frame = maxFrames >= 0 && (long long)frame_ >= maxFrames;
-        if (last_frame && !shot.empty()) {
+        bool lastFrame = maxFrames >= 0 && (long long)frame_ >= maxFrames;
+        if (lastFrame && !shot.empty()) {
             if (saveScreenshot(shot)) Log::info("screenshot written: " + shot);
             else { Log::error("screenshot failed: " + shot); rc = 1; }
         }
-        glfwSwapBuffers(window_);
-        if (last_frame) break;
+        context().endRenderPass();
+        device_->present();
+        if (lastFrame) break;
     }
     onShutdown();
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
+    device_->imguiShutdown();
+    window_->imguiShutdown();
     ImGui::DestroyContext();
-    glfwDestroyWindow(window_);
-    glfwTerminate();
+    device_.reset();     // GPU objects die before the window (and its context) does
+    window_.reset();
     return rc;
 }
 
