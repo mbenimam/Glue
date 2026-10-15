@@ -1,0 +1,421 @@
+#version 450 core
+// Progressive path tracer. One invocation = one pixel = one new light path per dispatch.
+// The path's radiance is ADDED to uAccum (rgb = sum, a = sample count), so the image the
+// display pass shows (rgb / a) is the running Monte Carlo mean and converges as 1/sqrt(N).
+//
+// Scene: ground plane y = 0, a list of spheres, one triangle mesh behind a BVH, one
+// rectangular area light facing down, and an optional procedural sky.
+// Lighting: next-event estimation (a shadow ray to a random point of the light) combined with
+// BSDF sampling by multiple importance sampling, power heuristic. See docs/theory-pathtracer.md.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(rgba32f, binding = 0) uniform image2D uAccum;
+
+struct Node { vec3 lo; uint leftOrFirst; vec3 hi; uint count; };          // matches prism::BvhNode
+struct Tri { vec4 v0; vec4 e1; vec4 e2; vec4 n0; vec4 n1; vec4 n2; };      // e1 = v1 - v0, e2 = v2 - v0
+struct Sphere { vec4 centerRadius; uint mat; uint pad0, pad1, pad2; };
+// albedo.w = type (0 diffuse, 1 metal, 2 glass), emission.w = roughness,
+// params = (ior, checker scale for the ground, unused, unused)
+struct Material { vec4 albedo; vec4 emission; vec4 params; };
+
+layout(std430, binding = 0) readonly buffer Nodes { Node nodes[]; };
+layout(std430, binding = 1) readonly buffer Tris { Tri tris[]; };
+layout(std430, binding = 2) readonly buffer Spheres { Sphere spheres[]; };
+layout(std430, binding = 3) readonly buffer Materials { Material materials[]; };
+layout(std430, binding = 4) buffer Counter { uint rayCount; };
+
+uniform int uWidth, uHeight;
+uniform int uFrame;                     // index of the sample being added (0 = clear the image)
+uniform uint uSeed;
+uniform vec3 uCamPos, uCamRight, uCamUp, uCamFwd;
+uniform float uTanHalfX, uTanHalfY;     // tan(fov / 2) horizontally and vertically
+uniform float uLensRadius, uFocusDist;  // thin lens: aperture radius and distance of the sharp plane
+uniform int uMaxBounces, uRRStart;
+uniform int uMisMode;                   // 0 BSDF sampling only, 1 light sampling only, 2 MIS
+uniform float uClamp;                   // > 0: cap indirect contributions (biased, kills fireflies)
+uniform int uSkyOn;
+uniform float uSkyIntensity;
+uniform vec3 uLightCorner, uLightU, uLightV, uLightRadiance;
+uniform int uSphereCount, uHasMesh, uMeshMat, uGroundMat;
+uniform int uCountRays;
+
+const float PI = 3.14159265358979;
+const float EPS = 1e-4;
+const float INF = 1e30;
+
+shared uint sRays;
+uint gRays = 0u;
+
+// ---------------------------------------------------------------- random numbers
+// PCG hash (Jarzynski & Olano 2020): a good 32-bit integer hash, cheap enough to run per sample.
+uint pcg(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+uint gRng = 0u;
+float rnd() { gRng = pcg(gRng); return float(gRng >> 8) * (1.0 / 16777216.0); }   // [0, 1)
+vec2 rnd2() { return vec2(rnd(), rnd()); }
+
+// ---------------------------------------------------------------- geometry
+struct Hit {
+    float t;
+    vec3 ng;      // geometric normal (not yet facing the ray)
+    vec3 ns;      // shading normal (interpolated for meshes)
+    int mat;      // material index, -1 for the light
+};
+
+bool hitSphere(vec3 ro, vec3 rd, vec4 s, float tmax, out float t) {
+    vec3 oc = ro - s.xyz;
+    float b = dot(oc, rd), c = dot(oc, oc) - s.w * s.w;
+    float disc = b * b - c;
+    if (disc < 0.0) return false;
+    float sq = sqrt(disc);
+    t = -b - sq;                       // nearer root, or the far one when we start inside
+    if (t <= EPS) t = -b + sq;
+    return t > EPS && t < tmax;
+}
+
+// Rectangle corner + s*U + t*V, s,t in [0,1]; U and V are perpendicular.
+bool hitLight(vec3 ro, vec3 rd, float tmax, out float t) {
+    vec3 n = cross(uLightU, uLightV);
+    float dn = dot(rd, n);
+    if (abs(dn) < 1e-8) return false;
+    t = dot(uLightCorner - ro, n) / dn;
+    if (t <= EPS || t >= tmax) return false;
+    vec3 p = ro + t * rd - uLightCorner;
+    float s = dot(p, uLightU) / dot(uLightU, uLightU), q = dot(p, uLightV) / dot(uLightV, uLightV);
+    return s >= 0.0 && s <= 1.0 && q >= 0.0 && q <= 1.0;
+}
+
+bool hitAabb(vec3 ro, vec3 invDir, vec3 lo, vec3 hi, float tmax, out float tnear) {
+    vec3 t1 = (lo - ro) * invDir, t2 = (hi - ro) * invDir;
+    vec3 tmin3 = min(t1, t2), tmax3 = max(t1, t2);
+    tnear = max(max(tmin3.x, tmin3.y), tmin3.z);
+    float tfar = min(min(tmax3.x, tmax3.y), tmax3.z);
+    return tfar >= max(tnear, 0.0) && tnear < tmax;
+}
+
+// Walks the BVH (near child first, far child on a small stack). Returns the triangle index or
+// -1; with `anyHit` it stops at the first triangle closer than tmax (shadow rays).
+int traceMesh(vec3 ro, vec3 rd, inout float tmax, out vec2 bary, bool anyHit) {
+    bary = vec2(0.0);
+    if (uHasMesh == 0) return -1;
+    vec3 inv = 1.0 / vec3(abs(rd.x) > 1e-12 ? rd.x : 1e-12, abs(rd.y) > 1e-12 ? rd.y : 1e-12,
+                          abs(rd.z) > 1e-12 ? rd.z : 1e-12);
+    float tn;
+    if (!hitAabb(ro, inv, nodes[0].lo, nodes[0].hi, tmax, tn)) return -1;
+    uint stack[32];
+    int sp = 0;
+    uint n = 0u;
+    int best = -1;
+    for (;;) {
+        Node node = nodes[n];
+        if (node.count > 0u) {
+            for (uint i = node.leftOrFirst; i < node.leftOrFirst + node.count; ++i) {
+                // Moller-Trumbore, same as the CPU reference in spatial/Bvh.cpp.
+                Tri tri = tris[i];
+                vec3 p = cross(rd, tri.e2.xyz);
+                float det = dot(tri.e1.xyz, p);
+                if (abs(det) < 1e-12) continue;
+                float inv_det = 1.0 / det;
+                vec3 s = ro - tri.v0.xyz;
+                float u = dot(s, p) * inv_det;
+                if (u < 0.0 || u > 1.0) continue;
+                vec3 q = cross(s, tri.e1.xyz);
+                float v = dot(rd, q) * inv_det;
+                if (v < 0.0 || u + v > 1.0) continue;
+                float t = dot(tri.e2.xyz, q) * inv_det;
+                if (t > EPS && t < tmax) {
+                    tmax = t; best = int(i); bary = vec2(u, v);
+                    if (anyHit) return best;
+                }
+            }
+        } else {
+            uint a = n + 1u, b = node.leftOrFirst;
+            float ta, tb;
+            bool ha = hitAabb(ro, inv, nodes[a].lo, nodes[a].hi, tmax, ta);
+            bool hb = hitAabb(ro, inv, nodes[b].lo, nodes[b].hi, tmax, tb);
+            if (ha && hb) {
+                if (tb < ta) { uint tmp = a; a = b; b = tmp; }
+                if (sp < 32) stack[sp++] = b;
+                n = a;
+                continue;
+            }
+            if (ha) { n = a; continue; }
+            if (hb) { n = b; continue; }
+        }
+        if (sp == 0) break;
+        n = stack[--sp];
+    }
+    return best;
+}
+
+bool closestHit(vec3 ro, vec3 rd, out Hit h) {
+    gRays++;
+    h.t = INF; h.mat = -2; h.ng = vec3(0, 1, 0); h.ns = h.ng;
+    if (abs(rd.y) > 1e-8) {                         // ground plane y = 0
+        float t = -ro.y / rd.y;
+        if (t > EPS && t < h.t) { h.t = t; h.ng = vec3(0, 1, 0); h.ns = h.ng; h.mat = uGroundMat; }
+    }
+    for (int i = 0; i < uSphereCount; ++i) {
+        float t;
+        if (hitSphere(ro, rd, spheres[i].centerRadius, h.t, t)) {
+            h.t = t;
+            h.ng = (ro + t * rd - spheres[i].centerRadius.xyz) / spheres[i].centerRadius.w;
+            h.ns = h.ng;
+            h.mat = int(spheres[i].mat);
+        }
+    }
+    float t;
+    if (hitLight(ro, rd, h.t, t)) { h.t = t; h.ng = normalize(cross(uLightU, uLightV)); h.ns = h.ng; h.mat = -1; }
+    vec2 bary;
+    int tri = traceMesh(ro, rd, h.t, bary, false);
+    if (tri >= 0) {
+        Tri tr = tris[tri];
+        h.ng = normalize(cross(tr.e1.xyz, tr.e2.xyz));
+        h.ns = normalize((1.0 - bary.x - bary.y) * tr.n0.xyz + bary.x * tr.n1.xyz + bary.y * tr.n2.xyz);
+        h.mat = uMeshMat;
+    }
+    return h.mat != -2;
+}
+
+// True when something blocks the segment ro -> ro + rd * dist (the light itself does not count).
+bool occluded(vec3 ro, vec3 rd, float dist) {
+    gRays++;
+    float tmax = dist;
+    if (abs(rd.y) > 1e-8) { float t = -ro.y / rd.y; if (t > EPS && t < tmax) return true; }
+    for (int i = 0; i < uSphereCount; ++i) { float t; if (hitSphere(ro, rd, spheres[i].centerRadius, tmax, t)) return true; }
+    vec2 bary;
+    return traceMesh(ro, rd, tmax, bary, true) >= 0;
+}
+
+// ---------------------------------------------------------------- sky
+vec3 sky(vec3 d) {
+    if (uSkyOn == 0) return vec3(0.0);
+    float up = clamp(d.y, -1.0, 1.0);
+    vec3 zenith = vec3(0.22, 0.42, 0.85), horizon = vec3(0.85, 0.88, 0.95), ground = vec3(0.30, 0.28, 0.26);
+    vec3 c = up > 0.0 ? mix(horizon, zenith, pow(up, 0.6)) : mix(horizon, ground, pow(-up, 0.4));
+    // Broad warm glow instead of a hard sun disc: a tiny bright sun only reachable by BSDF
+    // sampling would be a firefly generator.
+    vec3 sunDir = normalize(vec3(-0.5, 0.45, -0.6));
+    c += vec3(1.0, 0.8, 0.55) * 0.6 * pow(max(dot(d, sunDir), 0.0), 12.0);
+    return c * uSkyIntensity;
+}
+
+// ---------------------------------------------------------------- BSDFs
+// Orthonormal basis around n (Duff et al. 2017, branchless).
+void basis(vec3 n, out vec3 t, out vec3 b) {
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z), c = n.x * n.y * a;
+    t = vec3(1.0 + s * n.x * n.x * a, s * c, -s * n.x);
+    b = vec3(c, s + n.y * n.y * a, -n.y);
+}
+vec3 toWorld(vec3 v, vec3 n) { vec3 t, b; basis(n, t, b); return v.x * t + v.y * b + v.z * n; }
+
+float powerHeuristic(float a, float b) { float a2 = a * a; return a2 / (a2 + b * b); }
+
+// GGX / Trowbridge-Reitz microfacet distribution and Smith masking, alpha = roughness^2.
+float ggxD(float cosH, float a2) { float d = cosH * cosH * (a2 - 1.0) + 1.0; return a2 / (PI * d * d); }
+float smithG1(float cosV, float a2) { return 2.0 * cosV / (cosV + sqrt(a2 + (1.0 - a2) * cosV * cosV)); }
+vec3 schlick(vec3 f0, float c) { return f0 + (1.0 - f0) * pow(1.0 - c, 5.0); }
+
+bool isDelta(Material m) {
+    int type = int(m.albedo.w);
+    return type == 2 || (type == 1 && m.emission.w < 0.03);
+}
+
+vec3 albedoAt(Material m, vec3 p) {
+    vec3 a = m.albedo.rgb;
+    if (m.params.y > 0.0) {                         // checker for the ground
+        vec2 c = floor(p.xz * m.params.y);
+        a *= mod(c.x + c.y, 2.0) < 1.0 ? 1.0 : 0.45;
+    }
+    return a;
+}
+
+// f(wo, wi) * cos(theta_i) and the pdf with which sampleBsdf would have picked wi.
+// Only called for non-delta materials (diffuse, rough metal).
+vec3 evalBsdf(Material m, vec3 alb, vec3 n, vec3 wo, vec3 wi, out float pdf) {
+    float cosI = dot(n, wi), cosO = dot(n, wo);
+    pdf = 0.0;
+    if (cosI <= 0.0 || cosO <= 0.0) return vec3(0.0);
+    if (int(m.albedo.w) == 0) {
+        pdf = cosI / PI;
+        return alb / PI * cosI;
+    }
+    float a = m.emission.w * m.emission.w, a2 = a * a;
+    vec3 h = normalize(wo + wi);
+    float cosH = dot(n, h), oh = dot(wo, h);
+    float D = ggxD(cosH, a2);
+    pdf = D * cosH / (4.0 * oh);
+    return D * smithG1(cosI, a2) * smithG1(cosO, a2) * schlick(alb, oh) / (4.0 * cosO);
+}
+
+// Samples wi. `weight` = f * cos / pdf (what the throughput is multiplied by), `pdf` is the
+// solid-angle density (0 for delta lobes). Returns false when the path is absorbed.
+bool sampleBsdf(Material m, vec3 alb, vec3 n, vec3 ng, vec3 wo, bool frontFace, out vec3 wi, out vec3 weight,
+                out float pdf, out bool delta) {
+    int type = int(m.albedo.w);
+    delta = isDelta(m);
+    pdf = 0.0;
+    if (type == 0) {
+        // Cosine-weighted hemisphere: pdf = cos / pi cancels the cosine and the 1/pi of the
+        // Lambertian BRDF, leaving weight = albedo.
+        vec2 u = rnd2();
+        float r = sqrt(u.x), phi = 2.0 * PI * u.y;
+        wi = toWorld(vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u.x))), n);
+        pdf = max(dot(n, wi), 0.0) / PI;
+        weight = alb;
+        return dot(wi, ng) > 0.0;
+    }
+    if (type == 1) {
+        if (delta) {                                   // polished mirror
+            wi = reflect(-wo, n);
+            weight = schlick(alb, max(dot(n, wo), 0.0));
+            return dot(wi, ng) > 0.0;
+        }
+        // Sample a microfacet normal h with density D(h) cos(theta_h), reflect wo about it.
+        float a = m.emission.w * m.emission.w, a2 = a * a;
+        vec2 u = rnd2();
+        float cosH = sqrt((1.0 - u.x) / (1.0 + (a2 - 1.0) * u.x));
+        float sinH = sqrt(max(0.0, 1.0 - cosH * cosH)), phi = 2.0 * PI * u.y;
+        vec3 h = toWorld(vec3(sinH * cos(phi), sinH * sin(phi), cosH), n);
+        wi = reflect(-wo, h);
+        float cosI = dot(n, wi), cosO = dot(n, wo), oh = dot(wo, h);
+        if (cosI <= 0.0 || cosO <= 0.0 || oh <= 0.0 || dot(wi, ng) <= 0.0) return false;
+        pdf = ggxD(cosH, a2) * cosH / (4.0 * oh);
+        weight = schlick(alb, oh) * smithG1(cosI, a2) * smithG1(cosO, a2) * oh / (cosO * cosH);
+        return true;
+    }
+    // Smooth dielectric: reflect with probability F (exact Fresnel), otherwise refract.
+    float ior = m.params.x;
+    float eta = frontFace ? 1.0 / ior : ior;
+    float cosI = dot(n, wo);
+    float sin2T = eta * eta * max(0.0, 1.0 - cosI * cosI);
+    float F = 1.0;
+    float cosT = 0.0;
+    if (sin2T < 1.0) {
+        cosT = sqrt(1.0 - sin2T);
+        float rs = (eta * cosI - cosT) / (eta * cosI + cosT);
+        float rp = (cosI - eta * cosT) / (cosI + eta * cosT);
+        F = 0.5 * (rs * rs + rp * rp);
+    }
+    if (rnd() < F) {
+        wi = reflect(-wo, n);
+        weight = vec3(1.0);
+    } else {
+        wi = normalize(-wo * eta + (eta * cosI - cosT) * n);
+        weight = alb;                                  // tint on transmission
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- integrator
+vec3 radiance(vec3 ro, vec3 rd) {
+    vec3 L = vec3(0.0), T = vec3(1.0);
+    float prevPdf = 0.0;
+    bool prevDelta = true;                             // the camera ray counts as "specular"
+    vec3 lightN = normalize(cross(uLightU, uLightV));
+    float lightArea = length(cross(uLightU, uLightV));
+    for (int depth = 0; depth <= uMaxBounces; ++depth) {
+        Hit h;
+        if (!closestHit(ro, rd, h)) { L += T * sky(rd); break; }
+        vec3 p = ro + h.t * rd;
+        vec3 c = vec3(0.0);
+        if (h.mat == -1) {
+            // BSDF sampling found the light. Weight it against the light-sampling strategy
+            // that could have produced the same path at the previous vertex.
+            float cosL = -dot(rd, lightN);
+            if (cosL > 0.0) {
+                float w = 1.0;
+                if (!prevDelta) {
+                    if (uMisMode == 1) w = 0.0;
+                    else if (uMisMode == 2) w = powerHeuristic(prevPdf, h.t * h.t / (cosL * lightArea));
+                }
+                c = T * uLightRadiance * w;
+            }
+            L += (uClamp > 0.0 && depth > 0) ? min(c, vec3(uClamp)) : c;
+            break;                                     // the light does not reflect
+        }
+
+        Material m = materials[h.mat];
+        bool front = dot(rd, h.ng) < 0.0;
+        vec3 ng = front ? h.ng : -h.ng, ns = front ? h.ns : -h.ns;
+        if (dot(ns, -rd) <= 0.0) ns = ng;              // interpolated normal facing away: fall back
+        vec3 wo = -rd;
+        vec3 alb = albedoAt(m, p);
+        L += T * m.emission.rgb;                       // emissive surfaces (not light-sampled: full weight)
+
+        // Next-event estimation: one shadow ray towards a uniform point on the light.
+        if (!isDelta(m) && uMisMode != 0) {
+            vec3 lp = uLightCorner + rnd() * uLightU + rnd() * uLightV;
+            vec3 toL = lp - p;
+            float d2 = dot(toL, toL), d = sqrt(d2);
+            vec3 wl = toL / d;
+            float cosL = -dot(wl, lightN);
+            if (cosL > 0.0 && dot(wl, ng) > 0.0) {
+                float bsdfPdf;
+                vec3 f = evalBsdf(m, alb, ns, wo, wl, bsdfPdf);
+                if (any(greaterThan(f, vec3(0.0))) && !occluded(p + ng * EPS, wl, d - 2.0 * EPS)) {
+                    float lightPdf = d2 / (cosL * lightArea);   // area pdf 1/A converted to solid angle
+                    float w = uMisMode == 2 ? powerHeuristic(lightPdf, bsdfPdf) : 1.0;
+                    c = T * f * uLightRadiance * (w / lightPdf);
+                    L += (uClamp > 0.0 && depth > 0) ? min(c, vec3(uClamp)) : c;
+                }
+            }
+        }
+
+        if (depth == uMaxBounces) break;
+        vec3 wi, weight;
+        float pdf;
+        bool delta;
+        if (!sampleBsdf(m, alb, ns, ng, wo, front, wi, weight, pdf, delta)) break;
+        T *= weight;
+        prevPdf = pdf;
+        prevDelta = delta;
+        // Offset the new origin to the side of the surface the ray leaves through.
+        ro = p + (dot(wi, ng) > 0.0 ? ng : -ng) * EPS * max(1.0, length(p));
+        rd = wi;
+
+        // Russian roulette: continue with probability q, divide by q to stay unbiased.
+        if (depth >= uRRStart) {
+            float q = clamp(max(T.r, max(T.g, T.b)), 0.05, 0.95);
+            if (rnd() >= q) break;
+            T /= q;
+        }
+    }
+    return L;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    bool inside = px.x < uWidth && px.y < uHeight;
+    if (uCountRays != 0) {
+        if (gl_LocalInvocationIndex == 0u) sRays = 0u;
+        barrier();
+    }
+    if (inside) {
+        gRng = pcg(uint(px.y * uWidth + px.x) ^ pcg(uSeed + uint(uFrame) * 0x9E3779B9u));
+        // Jittered position inside the pixel: averaging the samples is the antialiasing.
+        vec2 ndc = (vec2(px) + rnd2()) / vec2(uWidth, uHeight) * 2.0 - 1.0;
+        vec3 dir = normalize(uCamFwd + ndc.x * uTanHalfX * uCamRight + ndc.y * uTanHalfY * uCamUp);
+        vec3 ro = uCamPos;
+        if (uLensRadius > 0.0) {
+            // Thin lens: every ray through the lens meets the pinhole ray on the focus plane.
+            vec3 focus = uCamPos + dir * (uFocusDist / dot(dir, uCamFwd));
+            vec2 u = rnd2();
+            float r = uLensRadius * sqrt(u.x), phi = 2.0 * PI * u.y;
+            ro = uCamPos + uCamRight * (r * cos(phi)) + uCamUp * (r * sin(phi));
+            dir = normalize(focus - ro);
+        }
+        vec3 L = radiance(ro, dir);
+        if (any(isnan(L)) || any(isinf(L))) L = vec3(0.0);
+        vec4 prev = uFrame == 0 ? vec4(0.0) : imageLoad(uAccum, px);
+        imageStore(uAccum, px, prev + vec4(L, 1.0));
+    }
+    if (uCountRays != 0) {
+        atomicAdd(sRays, gRays);
+        barrier();
+        if (gl_LocalInvocationIndex == 0u) atomicAdd(rayCount, sRays);
+    }
+}
