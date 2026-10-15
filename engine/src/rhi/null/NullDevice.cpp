@@ -1,4 +1,5 @@
 #include "rhi/null/NullDevice.h"
+#include <imgui.h>
 #include <cstring>
 #include <sstream>
 
@@ -151,8 +152,16 @@ public:
     CommandContext& context() override { return ctx_; }
     void present() override { ctx_.log.push_back("present"); }
     void setVsync(bool) override {}
-    void imguiInit() override {}
-    void imguiNewFrame() override {}
+    // Dear ImGui asks its renderer to create the font atlas texture. The null device has no texture to
+    // make, but it must answer the request or ImGui asserts, so it accepts every texture request.
+    void imguiInit() override { ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; }
+    void imguiNewFrame() override {
+        for (ImTextureData* t : ImGui::GetPlatformIO().Textures) {
+            if (t->Status == ImTextureStatus_WantCreate) t->SetTexID((ImTextureID)1);
+            if (t->Status == ImTextureStatus_WantCreate || t->Status == ImTextureStatus_WantUpdates) t->SetStatus(ImTextureStatus_OK);
+            if (t->Status == ImTextureStatus_WantDestroy) t->SetStatus(ImTextureStatus_Destroyed);
+        }
+    }
     void imguiRender() override {}
     void imguiShutdown() override {}
     const std::vector<std::string>& commandLog() const override { return ctx_.log; }
