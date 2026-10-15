@@ -1,0 +1,81 @@
+# Glue
+
+**A small OpenGL engine written from scratch, and four real-time graphics apps built on it: a Shadertoy-style shader lab, an SPH fluid simulator, an adaptive quad-mesh simplifier and an interactive GPU path tracer.**
+
+C++20 · OpenGL 4.5 · Premake5 · Dear ImGui · Linux (Wayland and X11) · MIT
+
+![Eleven post-processing effects on the Utah teapot, all written in GLSL inside GlueLab](docs/assets/effects-sheet.png)
+
+*Eleven fragment-shader effects (glitch, night vision, checkerboard, CRT, thermal, kaleidoscope, depth fog...) on the Utah teapot, tessellated from its 32 Bezier patches inside the engine. Every effect is one editable `.frag` file.*
+
+## At a glance
+
+| | |
+|---|---|
+| **What** | One engine, four apps. The geometry, the spatial structures, the SPH kernels and the BVH are written here, not pulled from a library (no GLM, no Eigen, no libigl). |
+| **Hardest parts** | A compute-shader path tracer that keeps accumulating samples while you orbit the camera; an incompressible SPH solver (PCISPH); a half-edge mesh with a quad simplifier driven by curvature "fitmaps". |
+| **Measured** | Path tracer: 427 MRays/s at 1280x720 on an RX 580 (Mesa), 685 samples per pixel in 5 s. Quad simplifier: at 600 quads on a rounded box, adaptive halves nothing magically but cuts the worst error from 1.35% to 0.86% of the bounding-box diagonal. |
+| **Verified** | 5808 unit-test checks (BVH against brute force, SPH kernels integrate to 1, half-edge invariants after random edits), run in CI without a GPU. |
+
+## The four apps
+
+| App | What you do with it | Evidence |
+|---|---|---|
+| **GlueLab** `gluelab` | Write a fragment shader in the editor. `iTime`, `iResolution`, `iMouse`, `iFrame`, `iChannel0..3` are provided; the scene (teapot or your OBJ) is `iChannel0` and its depth is `iChannel2`. A `uniform float uX = 0.5; // @range 0 1` line becomes a slider. Saved files hot-reload. | [`assets/effects/`](assets/effects) |
+| **SPH** `sph` | Dam break, drop and double dam break with WCSPH or PCISPH on the CPU (OpenMP), and WCSPH as compute shaders on the GPU. Particles are drawn as shaded sphere impostors. | [benchmarks](docs/sph-benchmarks.md), [theory](docs/theory-sph.md) |
+| **QuadMesh** `quadmesh` | Turn a triangle mesh into quads, then simplify it to a target quad count, uniformly or adaptively, next to a triangle-QEM baseline. Views: faces, curvature, fitmap, error heatmap. | [benchmarks](docs/quadmesh-benchmarks.md), [theory](docs/theory-quadmesh.md) |
+| **PathTracer** `pathtracer` | Progressive path tracing in a compute shader: SAH BVH, Lambert, GGX metal, glass, area light with next-event estimation and MIS, depth of field. Moving the camera resets the accumulation, so it stays interactive. | [benchmarks](docs/pathtracer-benchmarks.md), [theory](docs/theory-pathtracer.md) |
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/pathtracer-convergence.png" alt="Path tracer at 1, 16 and 256 samples per pixel"><br><sub>PathTracer: the same scene at 1, 16 and 256 samples per pixel.</sub></td>
+<td width="50%"><img src="docs/assets/sph.png" alt="SPH dam break with 18,414 particles"><br><sub>SPH: PCISPH dam break, 18,414 particles, coloured by speed.</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/assets/quadmesh.png" alt="Uniform and adaptive quad simplification of a rounded box, 600 quads each"><br><sub>QuadMesh: 600 quads each, uniform on the left, adaptive on the right. Adaptive puts its quads where the surface bends.</sub></td>
+</tr>
+</table>
+
+## How it fits together
+
+![Engine modules and which app uses which](docs/assets/diagrams/architecture.png)
+
+Each app is a small class that overrides `onInit`, `onUpdate`, `onRender` and `onGui` of `glue::Application`. The window system comes from GLFW 3.4, built from source in the Premake script with both backends: native Wayland when `WAYLAND_DISPLAY` is set, X11 otherwise (`--platform wayland|x11` forces one).
+
+## Build and run
+
+You need a C++20 compiler, `premake5` and the X11 development headers. `wayland-scanner` is optional: without it the build falls back to X11 only. GLFW, Dear ImGui, glad and stb are vendored in `third_party/`, so there is nothing else to install.
+
+```bash
+premake5 gmake
+make -C build config=release -j"$(nproc)"
+./bin/Release/tests          # 5808 checks, no GPU needed
+./bin/Release/gluelab        # also: sph, quadmesh, pathtracer
+```
+
+Every app accepts `--hidden --frames N --screenshot out.png` to render headless, which is how the images in this README were produced. `sph`, `quadmesh` and `pathtracer` also have `--bench`.
+
+OpenGL 4.5 core is required (compute shaders, direct state access). I develop on an AMD RX 580 with Mesa 26.
+
+## What is not done
+
+- QuadMesh keeps boundary vertices frozen, so on the open teapot the adaptive method loses to the uniform one at aggressive reductions (see the table in [the benchmarks](docs/quadmesh-benchmarks.md)). A boundary operator is the next thing to add. A triangle-QEM baseline is more accurate than either quad method at the same vertex count; the point of the quad methods is regular quads, not distance.
+- SPH walls are a clamp with restitution, not boundary particles, so density is underestimated near walls. PCISPH has no GPU port yet.
+- The path tracer lets light-sampling rays stop at glass, so shadows behind glass come only from caustic paths. Fireflies from glass caustics settle only after a few thousand samples.
+- Linux only so far; the Premake script has Windows branches that I have not built.
+
+## Documentation
+
+| Topic | Theory | Measurements |
+|---|---|---|
+| SPH fluids | [`theory-sph.md`](docs/theory-sph.md) | [`sph-benchmarks.md`](docs/sph-benchmarks.md) |
+| Quad-mesh simplification | [`theory-quadmesh.md`](docs/theory-quadmesh.md) | [`quadmesh-benchmarks.md`](docs/quadmesh-benchmarks.md) |
+| Path tracing | [`theory-pathtracer.md`](docs/theory-pathtracer.md) | [`pathtracer-benchmarks.md`](docs/pathtracer-benchmarks.md) |
+
+## Third-party code
+
+GLFW (zlib), Dear ImGui (MIT), glad (generated, public domain / MIT), stb (public domain / MIT), and the Newell teapot control points (public domain data). Licences are in each `third_party/` folder.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).
