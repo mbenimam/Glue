@@ -14,7 +14,7 @@ C++20 · OpenGL 4.5 · Premake5 · Dear ImGui · Linux (Wayland and X11) · MIT
 |---|---|
 | **What** | One engine, four apps. The geometry, the spatial structures, the SPH kernels and the BVH are written here, not pulled from a library (no GLM, no Eigen, no libigl). |
 | **Hardest parts** | A compute-shader path tracer that keeps accumulating samples while you orbit the camera; an incompressible SPH solver (PCISPH); a half-edge mesh with a quad simplifier driven by curvature "fitmaps". |
-| **Measured** | Path tracer: 427 MRays/s at 1280x720 on an RX 580 (Mesa), 685 samples per pixel in 5 s. Quad simplifier: at 600 quads on a rounded box, adaptive halves nothing magically but cuts the worst error from 1.35% to 0.86% of the bounding-box diagonal. |
+| **Measured** | Path tracer: 427 MRays/s at 1280x720 on an RX 580 (Mesa), 685 samples per pixel in 5 s. Quad simplifier: at 600 quads on a rounded box, the adaptive method cuts the worst-case error from 1.35% to 0.86% of the bounding-box diagonal compared with the uniform one. |
 | **Verified** | 5808 unit-test checks (BVH against brute force, SPH kernels integrate to 1, half-edge invariants after random edits), run in CI without a GPU. |
 
 ## The four apps
