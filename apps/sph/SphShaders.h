@@ -235,7 +235,7 @@ void main() {
 }
 )";
 
-// Container: 12 box edges (GL_LINES, 24 vertices) and a floor quad, all from gl_VertexID.
+// Container: 12 box edges (line list, 24 vertices) and a floor quad (triangle strip), all from gl_VertexID.
 inline const char* kBoxVs = R"(#version 450
 uniform mat4 uViewProj;
 uniform vec3 uBox;
