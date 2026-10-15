@@ -40,14 +40,19 @@ bool Application::saveScreenshot(const std::string& path) const {
 int Application::run(int argc, char** argv) {
     // Common flags: --frames N (exit after N frames), --screenshot file.png (written on the last frame).
     int maxFrames = -1;
-    std::string shot;
+    std::string shot, platform;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc) maxFrames = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--screenshot") && i + 1 < argc) shot = argv[++i];
         else if (!std::strcmp(argv[i], "--hidden")) cfg_.hidden = true;
+        else if (!std::strcmp(argv[i], "--platform") && i + 1 < argc) platform = argv[++i];
     }
     if (!shot.empty() && maxFrames < 0) maxFrames = 5;
 
+    // Window-system backend: by default GLFW picks Wayland when WAYLAND_DISPLAY is set, else X11.
+    if (platform == "x11") glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+    else if (platform == "wayland") glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
+    glfwSetErrorCallback([](int code, const char* msg) { Log::error("glfw " + std::to_string(code) + ": " + msg); });
     if (!glfwInit()) { Log::error("glfwInit failed"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
@@ -61,6 +66,10 @@ int Application::run(int argc, char** argv) {
     if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) { Log::error("glad failed"); return 1; }
     glEnable(GL_DEBUG_OUTPUT);
     glDebugMessageCallback(glDebug, nullptr);
+    {
+        int p = glfwGetPlatform();
+        Log::info(std::string("window system: ") + (p == GLFW_PLATFORM_WAYLAND ? "Wayland (native)" : p == GLFW_PLATFORM_X11 ? "X11" : "other"));
+    }
     Log::info(std::string("GL ") + (const char*)glGetString(GL_VERSION) + " | " + (const char*)glGetString(GL_RENDERER));
 
     IMGUI_CHECKVERSION();

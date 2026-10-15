@@ -27,6 +27,28 @@ project "glad"
     files { "third_party/glad/src/gl.c" }
     includedirs { "third_party/glad/include" }
 
+-- GLFW's Wayland backend needs client headers and glue code generated from the protocol XML.
+-- The XML files ship with GLFW (third_party/glfw/deps/wayland); wayland-scanner is the system tool.
+local wlGen = "build/glfw-wayland"
+local wlProtocols = { "wayland", "viewporter", "xdg-shell", "idle-inhibit-unstable-v1",
+                      "pointer-constraints-unstable-v1", "relative-pointer-unstable-v1",
+                      "fractional-scale-v1", "xdg-activation-v1", "xdg-decoration-unstable-v1" }
+local wlEnabled = false
+if os.target() == "linux" and os.getenv("PRISM_NO_WAYLAND") == nil then
+    os.mkdir(wlGen)
+    wlEnabled = true
+    for _, name in ipairs(wlProtocols) do
+        local xml = "third_party/glfw/deps/wayland/" .. name .. ".xml"
+        local ok1 = os.execute("wayland-scanner client-header " .. xml .. " " .. wlGen .. "/" .. name .. "-client-protocol.h")
+        local ok2 = os.execute("wayland-scanner private-code " .. xml .. " " .. wlGen .. "/" .. name .. "-client-protocol-code.h")
+        if not (ok1 and ok2) then
+            print("wayland-scanner failed for " .. name .. "; building X11 only")
+            wlEnabled = false
+            break
+        end
+    end
+end
+
 project "glfw"
     kind "StaticLib"
     language "C"
@@ -42,6 +64,11 @@ project "glfw"
     includedirs { "third_party/glfw/include" }
     filter "system:linux"
         defines { "_GLFW_X11" }
+        if wlEnabled then
+            defines { "_GLFW_WAYLAND" }
+            files { "third_party/glfw/src/wl_init.c", "third_party/glfw/src/wl_monitor.c", "third_party/glfw/src/wl_window.c" }
+            includedirs { wlGen }
+        end
         files {
             "third_party/glfw/src/posix_module.c", "third_party/glfw/src/posix_thread.c", "third_party/glfw/src/posix_time.c",
             "third_party/glfw/src/posix_poll.c", "third_party/glfw/src/linux_joystick.c", "third_party/glfw/src/xkb_unicode.c",
