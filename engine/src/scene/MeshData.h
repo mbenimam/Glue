@@ -26,6 +26,8 @@ struct MeshData {
 // `segments` is the subdivision count per patch edge. Vertices are welded across patches.
 MeshData makeTeapot(int segments = 12);
 MeshData makeUvSphere(int rings, int sectors, float radius = 1.0f);
+// Subdivided icosahedron: near-uniform triangles, 20 * 4^subdivisions faces, closed and welded.
+MeshData makeIcosphere(int subdivisions, float radius = 1.0f);
 MeshData makePlane(float halfSize, float y = 0.0f);
 
 // Wavefront OBJ: v/vt/vn, polygons (fan-triangulated), negative indices.
