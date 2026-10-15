@@ -439,7 +439,8 @@ private:
         std::vector<float> h;
         for (float x : model_->curv.mean) h.push_back(std::fabs(x));
         std::sort(h.begin(), h.end());
-        hScale_ = h.empty() ? 1.0f : std::max(h[h.size() * 95 / 100], 1e-6f);
+        // 99th percentile: a few sharp spots should saturate, not the whole smooth part.
+        hScale_ = h.empty() ? 1.0f : std::max(h[h.size() * 99 / 100], 1e-6f);
         Log::info(model_->name + ": " + std::to_string(model_->tri.liveFaces()) + " triangles, prep " +
                   std::to_string((int)model_->prepMs) + " ms (fitmaps " + std::to_string((int)model_->fit.ms) + " ms)");
         camera_.distance = compare_ ? 6.2f : 3.6f;
@@ -587,10 +588,12 @@ private:
         row("faces", "%zu", r.q.faces);
         row("quads / tris", "%zu / %zu", r.q.quads, r.q.triangles);
         row("quads", "%.1f %%", r.q.percentQuads);
-        row("regular vertices", "%.1f %%", r.q.percentRegular);
-        row("quad quality", "%.3f (min %.2f)", r.q.meanQuality, r.q.minQuality);
-        row("angle deviation", "%.1f deg", r.q.meanAngleDeviation);
-        row("homeometry", "%.3f", r.homeo);
+        if (r.q.quads) {                                   // quad-only measures
+            row("regular vertices", "%.1f %%", r.q.percentRegular);
+            row("quad quality", "%.3f (min %.2f)", r.q.meanQuality, r.q.minQuality);
+            row("angle deviation", "%.1f deg", r.q.meanAngleDeviation);
+            row("homeometry", "%.3f", r.homeo);
+        }
         row("Hausdorff", "%.3f %% diag", 100.0 * r.d.hausdorff / dg);
         row("mean distance", "%.4f %% diag", 100.0 * 0.5 * (r.d.meanAB + r.d.meanBA) / dg);
         row("time", "%.1f ms", r.ms);
