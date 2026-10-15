@@ -9,13 +9,11 @@
 // Scene flags: --scene dam|drop|double  --solver wcsph|pcisph|gpu  --count N  --steps N (pre-simulate)
 #include "core/Application.h"
 #include "core/Log.h"
-#include "gfx/Shader.h"
-#include "gfx/Texture.h"
+#include "rhi/Rhi.h"
 #include "scene/Camera.h"
 #include "GpuSph.h"
 #include "SphShaders.h"
 #include "SphSolver.h"
-#include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <omp.h>
@@ -81,14 +79,26 @@ public:
 protected:
     bool onInit(int argc, char** argv) override {
         ImGui::GetIO().IniFilename = "glue_sph.ini";   // own layout file, not GlueLab's
-        if (!particles_.compileGraphics(kParticleVs, kParticleFs) || !box_.compileGraphics(kBoxVs, kBoxFs)) {
-            Log::error("render shaders: " + particles_.error() + box_.error());
-            return false;
-        }
-        glCreateVertexArrays(1, &emptyVao_);
-        glCreateQueries(GL_TIME_ELAPSED, 2, queries_);
+        // Impostors and container read gl_VertexID / gl_InstanceID only: no vertex layout.
         std::string err;
-        gpuOk_ = gpu_.init(err);
+        rhi::GraphicsPipelineDesc pd;
+        pd.vertexSource = kParticleVs;
+        pd.fragmentSource = kParticleFs;
+        pd.topology = rhi::Topology::TriangleStrip;
+        pd.debugName = "sph particles";
+        particles_ = device().createGraphicsPipeline(pd, &err);
+        if (!particles_) { Log::error("render shaders: particles: " + err); return false; }
+        pd.vertexSource = kBoxVs;
+        pd.fragmentSource = kBoxFs;
+        pd.debugName = "sph floor";
+        boxFloor_ = device().createGraphicsPipeline(pd, &err);
+        if (!boxFloor_) { Log::error("render shaders: box: " + err); return false; }
+        pd.topology = rhi::Topology::Lines;
+        pd.debugName = "sph box edges";
+        boxEdges_ = device().createGraphicsPipeline(pd, &err);
+        if (!boxEdges_) { Log::error("render shaders: box: " + err); return false; }
+        for (auto& t : timers_) t = device().createTimer();
+        gpuOk_ = gpu_.init(device(), err);
         if (!gpuOk_) Log::warn("GPU compute path disabled: " + err);
 
         int preSteps = 0;
@@ -120,20 +130,25 @@ protected:
     }
 
     void onUpdate(float) override {
+        // The render target follows the viewport panel size of the previous frame. It is recreated
+        // here, before this frame's GUI refers to its texture, never between onGui and the draw.
+        int tw = std::max(vpW_, 16), th = std::max(vpH_, 16);
+        if (!target_ || target_->width() != tw || target_->height() != th) {
+            rhi::RenderTargetDesc d;
+            d.width = tw; d.height = th; d.colorFormat = rhi::Format::RGBA8; d.depth = true; d.debugName = "sph view";
+            target_ = device().createRenderTarget(d);
+        }
         if (paused_ && !stepRequested_) return;
         int n = stepRequested_ ? 1 : stepsPerFrame_;
         stepRequested_ = false;
         if (backend_ == GpuWcsph) {
-            // GPU time from a timer query, read back a frame later so we never stall on it.
-            GLuint q = queries_[queryIdx_];
-            if (queryPending_[queryIdx_]) {
-                GLuint64 ns = 0;
-                glGetQueryObjectui64v(q, GL_QUERY_RESULT, &ns);
-                gpuMsPerStep_ = ns * 1e-6 / std::max(queryStepsIn_[queryIdx_], 1);
-            }
-            glBeginQuery(GL_TIME_ELAPSED, q);
+            // GPU time from a timer, read back a frame later so we never stall on it.
+            rhi::GpuTimer& q = *timers_[queryIdx_];
+            if (queryPending_[queryIdx_])
+                gpuMsPerStep_ = q.resultNanoseconds() * 1e-6 / std::max(queryStepsIn_[queryIdx_], 1);
+            context().beginTimer(q);
             for (int s = 0; s < n; ++s) gpu_.step(params_);
-            glEndQuery(GL_TIME_ELAPSED);
+            context().endTimer(q);
             queryPending_[queryIdx_] = true;
             queryStepsIn_[queryIdx_] = n;
             queryIdx_ = 1 - queryIdx_;
@@ -146,14 +161,13 @@ protected:
     }
 
     void onShutdown() override {
+        // GPU objects must die while the device is still alive.
         gpu_.shutdown();
-        particles_.destroy(); box_.destroy();
-        fbo_.destroy();
-        GLuint bufs[] = {cpuPos_, cpuVel_, cpuRho_};
-        for (GLuint b : bufs) if (b) glDeleteBuffers(1, &b);
-        if (queries_[0]) glDeleteQueries(2, queries_);
-        if (emptyVao_) glDeleteVertexArrays(1, &emptyVao_);
-        emptyVao_ = 0;
+        particles_.reset(); boxFloor_.reset(); boxEdges_.reset();
+        target_.reset();
+        cpuPos_.reset(); cpuVel_.reset(); cpuRho_.reset();
+        cpuCapacity_ = 0;
+        for (auto& t : timers_) t.reset();
     }
 
     void onScroll(double, double dy) override {
@@ -172,48 +186,55 @@ protected:
     }
 
     void onRender() override {
-        int w = std::max(vpW_, 16), h = std::max(vpH_, 16);
-        fbo_.resize(w, h, GL_RGBA8);
-        fbo_.bind();
-        glEnable(GL_DEPTH_TEST);
-        glClearColor(0.05f, 0.06f, 0.08f, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        Mat4 proj = camera_.projection((float)w / h), view = camera_.view();
-        glBindVertexArray(emptyVao_);
+        int w = target_->width(), h = target_->height();
+        rhi::CommandContext& ctx = context();
 
-        // Container: floor quad, then the edges.
-        box_.bind();
-        box_.set("uViewProj", proj * view);
-        box_.set("uBox", params_.box);
-        box_.set("uFloor", 1);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        box_.set("uFloor", 0);
-        glDrawArrays(GL_LINES, 0, 24);
-
-        // Particles. CPU solvers upload their arrays; the GPU solver's buffers are drawn as they are.
+        // Particles. CPU solvers upload their arrays (before the pass); the GPU solver's buffers are
+        // drawn as they are, once its compute writes are visible.
         size_t n = 0;
+        rhi::Buffer *pos = nullptr, *vel = nullptr, *rho = nullptr;
         if (backend_ == GpuWcsph) {
             n = gpu_.count();
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, gpu_.posBuffer());
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, gpu_.velBuffer());
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, gpu_.rhoBuffer());
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+            if (n) { pos = &gpu_.posBuffer(); vel = &gpu_.velBuffer(); rho = &gpu_.rhoBuffer(); }
+            ctx.barrier(rhi::Barrier::StorageBuffer);
         } else {
             n = cpu_.count();
             uploadCpuParticles();
+            pos = cpuPos_.get(); vel = cpuVel_.get(); rho = cpuRho_.get();
         }
-        if (n) {
-            particles_.bind();
-            particles_.set("uView", view);
-            particles_.set("uProj", proj);
-            particles_.set("uRadius", 0.5f * cpu_.spacing() * radiusScale_);
-            particles_.set("uRho0", params_.restDensity);
-            particles_.set("uMaxSpeed", maxSpeedColor_);
-            particles_.set("uDensRange", densRange_);
-            particles_.set("uColorBy", colorBy_);
-            glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)n);
+
+        rhi::RenderPassDesc pass;
+        pass.clearColorValue[0] = 0.05f; pass.clearColorValue[1] = 0.06f; pass.clearColorValue[2] = 0.08f;
+        ctx.beginRenderPass(target_.get(), pass);
+        Mat4 proj = camera_.projection((float)w / h), view = camera_.view();
+
+        // Container: floor quad, then the edges.
+        ctx.bindPipeline(*boxFloor_);
+        boxFloor_->set("uViewProj", proj * view);
+        boxFloor_->set("uBox", params_.box);
+        boxFloor_->set("uFloor", 1);
+        ctx.draw(4);
+        ctx.bindPipeline(*boxEdges_);
+        boxEdges_->set("uViewProj", proj * view);
+        boxEdges_->set("uBox", params_.box);
+        boxEdges_->set("uFloor", 0);
+        ctx.draw(24);
+
+        if (n && pos) {
+            ctx.bindPipeline(*particles_);
+            ctx.bindStorageBuffer(0, *pos);
+            ctx.bindStorageBuffer(1, *vel);
+            ctx.bindStorageBuffer(2, *rho);
+            particles_->set("uView", view);
+            particles_->set("uProj", proj);
+            particles_->set("uRadius", 0.5f * cpu_.spacing() * radiusScale_);
+            particles_->set("uRho0", params_.restDensity);
+            particles_->set("uMaxSpeed", maxSpeedColor_);
+            particles_->set("uDensRange", densRange_);
+            particles_->set("uColorBy", colorBy_);
+            ctx.draw(4, (uint32_t)n);   // one triangle-strip quad per particle
         }
-        Framebuffer::unbind();
+        ctx.endRenderPass();
     }
 
 private:
@@ -260,28 +281,30 @@ private:
 
     void uploadCpuParticles() {
         size_t n = cpu_.count();
-        if (n != cpuCapacity_) {
-            GLuint bufs[] = {cpuPos_, cpuVel_, cpuRho_};
-            for (GLuint b : bufs) if (b) glDeleteBuffers(1, &b);
-            glCreateBuffers(1, &cpuPos_); glCreateBuffers(1, &cpuVel_); glCreateBuffers(1, &cpuRho_);
-            glNamedBufferData(cpuPos_, (GLsizeiptr)(std::max<size_t>(n, 1) * 16), nullptr, GL_STREAM_DRAW);
-            glNamedBufferData(cpuVel_, (GLsizeiptr)(std::max<size_t>(n, 1) * 16), nullptr, GL_STREAM_DRAW);
-            glNamedBufferData(cpuRho_, (GLsizeiptr)(std::max<size_t>(n, 1) * 4), nullptr, GL_STREAM_DRAW);
+        if (n != cpuCapacity_ || !cpuPos_) {
+            auto make = [&](size_t bytesPerParticle, const char* name) {
+                rhi::BufferDesc d;
+                d.size = std::max<size_t>(n, 1) * bytesPerParticle;
+                d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::CpuWrite;
+                d.debugName = name;
+                return device().createBuffer(d);
+            };
+            cpuPos_ = make(16, "sph cpu pos");
+            cpuVel_ = make(16, "sph cpu vel");
+            cpuRho_ = make(4, "sph cpu rho");
             cpuCapacity_ = n;
         }
+        if (!n) return;
         staging_.resize(n * 4);
-        auto put = [&](const std::vector<Vec3>& src, GLuint buf) {
+        auto put = [&](const std::vector<Vec3>& src, rhi::Buffer& buf) {
             for (size_t i = 0; i < n; ++i) {
                 staging_[4 * i] = src[i].x; staging_[4 * i + 1] = src[i].y; staging_[4 * i + 2] = src[i].z; staging_[4 * i + 3] = 1;
             }
-            glNamedBufferSubData(buf, 0, (GLsizeiptr)(n * 16), staging_.data());
+            buf.write(0, staging_.data(), n * 16);
         };
-        put(cpu_.positions(), cpuPos_);
-        put(cpu_.velocities(), cpuVel_);
-        glNamedBufferSubData(cpuRho_, 0, (GLsizeiptr)(n * 4), cpu_.densities().data());
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, cpuPos_);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, cpuVel_);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, cpuRho_);
+        put(cpu_.positions(), *cpuPos_);
+        put(cpu_.velocities(), *cpuVel_);
+        cpuRho_->write(0, cpu_.densities().data(), n * 4);
     }
 
     // ---- headless modes ----
@@ -375,7 +398,7 @@ private:
         return all;
     }
 
-    // Timings are medians over the timed steps (GPU: over batches of 10 steps between glFinish),
+    // Timings are medians over the timed steps (GPU: over batches of 10 steps between waitIdle),
     // so a background process stealing a core for a moment does not skew a row.
     void runBench() {
         const int warm = 20, timed = 100;
@@ -398,12 +421,12 @@ private:
                 if (b == GpuWcsph) {
                     gpu_.upload(cpu_);
                     for (int k = 0; k < warm; ++k) gpu_.step(p);
-                    glFinish();
+                    context().waitIdle();
                     std::vector<double> batches;
                     for (int k = 0; k < timed / 10; ++k) {
                         auto t0 = Clock::now();
                         for (int s = 0; s < 10; ++s) gpu_.step(p);
-                        glFinish();
+                        context().waitIdle();
                         batches.push_back(msSince(t0) / 10);
                     }
                     double ms = median(batches);
@@ -566,8 +589,8 @@ private:
         ImGui::Begin("Viewport");
         ImVec2 sz = ImGui::GetContentRegionAvail();
         vpW_ = (int)sz.x; vpH_ = (int)sz.y;
-        if (fbo_.colorTexture())
-            ImGui::Image((ImTextureID)(intptr_t)fbo_.colorTexture(), sz, {0, 1}, {1, 0});
+        if (target_)
+            ImGui::Image((ImTextureID)(intptr_t)target_->color().imguiId(), sz, {0, 1}, {1, 0});
         viewportHovered_ = ImGui::IsItemHovered();
         ImGuiIO& io = ImGui::GetIO();
         if (viewportHovered_ && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) camera_.rotate(io.MouseDelta.x, io.MouseDelta.y);
@@ -581,12 +604,12 @@ private:
     GpuSph gpu_;
     bool gpuOk_ = false;
     Summary gpuSummary_;
-    Shader particles_, box_;
-    Framebuffer fbo_;
-    GLuint emptyVao_ = 0, cpuPos_ = 0, cpuVel_ = 0, cpuRho_ = 0;
+    std::unique_ptr<rhi::Pipeline> particles_, boxFloor_, boxEdges_;
+    std::unique_ptr<rhi::RenderTarget> target_;
+    std::unique_ptr<rhi::Buffer> cpuPos_, cpuVel_, cpuRho_;
     size_t cpuCapacity_ = 0;
     std::vector<float> staging_;
-    GLuint queries_[2] = {0, 0};
+    std::unique_ptr<rhi::GpuTimer> timers_[2];
     bool queryPending_[2] = {false, false};
     int queryStepsIn_[2] = {1, 1}, queryIdx_ = 0;
     double gpuMsPerStep_ = 0;
