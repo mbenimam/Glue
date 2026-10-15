@@ -21,6 +21,7 @@
 #include "scene/Camera.h"
 #include "scene/MeshData.h"
 #include <imgui.h>
+#include "ui/Theme.h"
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -593,7 +594,7 @@ private:
         if (ImGui::Combo("##view", &v, views, 4)) { view_ = (View)v; dirtyGpu_ = true; }
         if (view_ == View::Error) {
             ImGui::SetNextItemWidth(-90);
-            if (ImGui::SliderFloat("red at %diag", &errScale_, 0.05f, 2.0f, "%.2f")) dirtyGpu_ = true;
+            if (ui::slider("red at %diag", &errScale_, 0.05f, 2.0f, "%.2f")) dirtyGpu_ = true;
         }
         ImGui::Checkbox("Wireframe", &wire_);
         if (ImGui::Checkbox("Side by side", &compare_)) { camera_.distance = compare_ ? 6.2f : 3.6f; dirtyGpu_ = true; }

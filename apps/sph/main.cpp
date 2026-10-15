@@ -15,6 +15,7 @@
 #include "SphShaders.h"
 #include "SphSolver.h"
 #include <imgui.h>
+#include "ui/Theme.h"
 #include <imgui_internal.h>
 #include <omp.h>
 #include <algorithm>
@@ -504,18 +505,18 @@ private:
         ImGui::SeparatorText("Resolution (resets)");
         ImGui::SliderInt("particles", &params_.targetCount, 1000, 200000, "%d", ImGuiSliderFlags_Logarithmic);
         if (ImGui::IsItemDeactivatedAfterEdit()) needReset = true;
-        ImGui::SliderFloat("h / spacing", &params_.hRatio, 1.5f, 3.0f, "%.2f");
+        ui::slider("h / spacing", &params_.hRatio, 1.5f, 3.0f, "%.2f");
         if (ImGui::IsItemDeactivatedAfterEdit()) needReset = true;
         ImGui::TextDisabled("h = %.4f m, spacing %.4f m, mass %.3g kg", cpu_.h(), cpu_.spacing(), cpu_.mass());
 
         ImGui::SeparatorText("Fluid");
         bool live = false;
-        live |= ImGui::SliderFloat("rest density", &params_.restDensity, 100.0f, 3000.0f, "%.0f kg/m3");
+        live |= ui::slider("rest density", &params_.restDensity, 100.0f, 3000.0f, "%.0f kg/m3");
         if (ImGui::IsItemDeactivatedAfterEdit()) needReset = true;   // mass is derived from it
         live |= ImGui::SliderFloat("viscosity mu", &params_.viscosity, 0.0f, 20.0f, "%.2f Pa s", ImGuiSliderFlags_Logarithmic);
-        live |= ImGui::SliderFloat("XSPH eps", &params_.xsph, 0.0f, 0.5f, "%.3f");
-        live |= ImGui::SliderFloat("gravity y", &params_.gravity.y, -20.0f, 5.0f, "%.2f m/s2");
-        live |= ImGui::SliderFloat("restitution", &params_.restitution, 0.0f, 1.0f, "%.2f");
+        live |= ui::slider("XSPH eps", &params_.xsph, 0.0f, 0.5f, "%.3f");
+        live |= ui::slider("gravity y", &params_.gravity.y, -20.0f, 5.0f, "%.2f m/s2");
+        live |= ui::slider("restitution", &params_.restitution, 0.0f, 1.0f, "%.2f");
 
         ImGui::SeparatorText("Time step");
         float dtMs = params_.dt * 1000.0f;
@@ -524,7 +525,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("CFL now")) { params_.dt = cpu_.suggestedDt(); live = true; }
         if (backend_ != CpuPcisph) {
-            live |= ImGui::SliderFloat("sound speed c0", &params_.soundSpeed, 5.0f, 100.0f, "%.1f m/s");
+            live |= ui::slider("sound speed c0", &params_.soundSpeed, 5.0f, 100.0f, "%.1f m/s");
             ImGui::TextDisabled("Tait stiffness B = %.3g Pa", params_.restDensity * params_.soundSpeed * params_.soundSpeed / 7);
         } else {
             float pct = params_.pciMaxError * 100.0f;
@@ -541,9 +542,9 @@ private:
         ImGui::RadioButton("speed", &colorBy_, 0);
         ImGui::SameLine();
         ImGui::RadioButton("density", &colorBy_, 1);
-        if (colorBy_ == 0) ImGui::SliderFloat("speed range", &maxSpeedColor_, 0.5f, 10.0f, "%.1f m/s");
-        else ImGui::SliderFloat("density range", &densRange_, 0.005f, 0.2f, "+-%.3f");
-        ImGui::SliderFloat("radius scale", &radiusScale_, 0.3f, 1.5f, "%.2f");
+        if (colorBy_ == 0) ui::slider("speed range", &maxSpeedColor_, 0.5f, 10.0f, "%.1f m/s");
+        else ui::slider("density range", &densRange_, 0.005f, 0.2f, "+-%.3f");
+        ui::slider("radius scale", &radiusScale_, 0.3f, 1.5f, "%.2f");
         ImGui::End();
     }
 

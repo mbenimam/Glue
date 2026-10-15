@@ -1,6 +1,8 @@
 #include "core/Application.h"
 #include "core/Log.h"
+#include "core/Assets.h"
 #include "gfx/ImageIO.h"
+#include "ui/Theme.h"
 #include <imgui.h>
 #include <cstdlib>
 #include <cstring>
@@ -65,9 +67,7 @@ int Application::run(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = "gluelab.ini";
-    ImGui::StyleColorsDark();
-    ImGuiStyle& st = ImGui::GetStyle();
-    st.WindowRounding = 4; st.FrameRounding = 3; st.TabRounding = 3; st.FramePadding = {8, 4};
+    ui::install(assetsDir());
     window_->imguiInit();
     device_->imguiInit();
     window_->setScrollCallback([this](double dx, double dy) { onScroll(dx, dy); });

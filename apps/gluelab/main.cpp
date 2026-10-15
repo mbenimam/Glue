@@ -15,6 +15,8 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
+#include "ui/GlslEditor.h"
+#include "ui/Theme.h"
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -212,15 +214,15 @@ private:
 
     void effectsPanel() {
         ImGui::Begin("Effects");
+        ui::sectionHeader("Effects");
         for (const auto& name : effects_) {
             bool sel = fs::path(current_).filename() == name;
-            if (ImGui::Selectable(name.c_str(), sel)) selectEffect(name);
+            if (ui::listRow(name.c_str(), sel)) selectEffect(name);
         }
-        ImGui::Separator();
-        ImGui::TextUnformatted("Model (.obj)");
+        ui::sectionHeader("Model (.obj)");
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputText("##obj", &objPath_, ImGuiInputTextFlags_EnterReturnsTrue)) loadModel(objPath_);
-        ImGui::TextUnformatted("iChannel1 texture");
+        ui::sectionHeader("iChannel1 texture");
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputText("##tex", &texPath_, ImGuiInputTextFlags_EnterReturnsTrue)) {
             if (!loadUserTexture(texPath_)) makeNoiseTexture();
@@ -230,38 +232,51 @@ private:
 
     void editorPanel() {
         ImGui::Begin("Shader");
-        ImGui::Text("%s%s", fs::path(current_).filename().string().c_str(), dirty_ ? "  *" : "");
+        ImGui::PushFont(ui::fonts().strong);
+        ImGui::TextUnformatted(fs::path(current_).filename().string().c_str());
+        ImGui::PopFont();
+        if (dirty_) { ImGui::SameLine(); ImGui::TextColored(ui::palette().warning, "unsaved"); }
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 160.0f);
+        ui::toggle("Pause", &paused_);
         ImGui::SameLine();
-        if (ImGui::SmallButton("Save")) saveEffect();
-        ImGui::SameLine();
-        ImGui::Checkbox("Pause", &paused_);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(90);
-        ImGui::SliderFloat("speed", &timeScale_, 0.0f, 3.0f);
+        if (ui::accentButton("Save")) saveEffect();
+        ImGui::SetNextItemWidth(220);
+        ui::slider("Speed", &timeScale_, 0.0f, 3.0f, "%.2fx");
         ImVec2 sz = ImGui::GetContentRegionAvail();
-        sz.y -= 70;
-        if (ImGui::InputTextMultiline("##src", &source_, {sz.x, sz.y}, ImGuiInputTextFlags_AllowTabInput)) {
+        sz.y -= 44;
+        if (editor_.draw("##src", &source_, {sz.x, sz.y})) {
             dirty_ = true;
             lastEdit_ = time();
         }
+        editor_.setErrorLines(error_.empty() ? std::vector<int>{} : ui::GlslEditor::parseErrorLines(error_));
         if (!error_.empty()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, {1, 0.4f, 0.4f, 1});
+            ui::chip("error", ui::palette().danger);
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ui::palette().danger);
+            ImGui::PushFont(ui::fonts().code);
             ImGui::TextWrapped("%s", error_.c_str());
+            ImGui::PopFont();
             ImGui::PopStyleColor();
         } else {
-            ImGui::TextColored({0.4f, 1, 0.5f, 1}, "compiled");
+            ui::chip("compiled", ui::palette().success);
         }
         ImGui::End();
     }
 
     void paramsPanel() {
         ImGui::Begin("Parameters");
-        ImGui::Text("iTime %.2f   iFrame %llu", shaderTime_, frame());
-        ImGui::Text("iMouse %.0f %.0f  (right-drag in viewport)", mouse_[0], mouse_[1]);
-        ImGui::Separator();
+        ui::sectionHeader("Inputs");
+        ImGui::PushFont(ui::fonts().code);
+        ImGui::TextColored(ui::palette().textDim, "iTime  %.2f", shaderTime_);
+        ImGui::TextColored(ui::palette().textDim, "iFrame %llu", frame());
+        ImGui::TextColored(ui::palette().textDim, "iMouse %.0f %.0f", mouse_[0], mouse_[1]);
+        ImGui::PopFont();
+        ImGui::TextDisabled("right-drag in the viewport");
+        ui::sectionHeader("Uniforms");
         if (params_.empty()) ImGui::TextDisabled("Declare `uniform float uX = 0.5; // @range 0 1`\nto get a slider here.");
         for (auto& p : params_) {
             switch (p.kind) {
-                case UniformParam::Float: ImGui::SliderFloat(p.name.c_str(), &p.value[0], p.lo, p.hi); break;
+                case UniformParam::Float: ui::slider(p.name.c_str(), &p.value[0], p.lo, p.hi); break;
                 case UniformParam::Int: {
                     int v = (int)p.value[0];
                     if (ImGui::SliderInt(p.name.c_str(), &v, (int)p.lo, (int)p.hi)) p.value[0] = (float)v;
@@ -269,7 +284,7 @@ private:
                 }
                 case UniformParam::Bool: {
                     bool b = p.value[0] > 0.5f;
-                    if (ImGui::Checkbox(p.name.c_str(), &b)) p.value[0] = b ? 1.0f : 0.0f;
+                    if (ui::toggle(p.name.c_str(), &b)) p.value[0] = b ? 1.0f : 0.0f;
                     break;
                 }
                 case UniformParam::Color: ImGui::ColorEdit3(p.name.c_str(), p.value); break;
@@ -280,7 +295,9 @@ private:
 
     void consolePanel() {
         ImGui::Begin("Console");
+        ImGui::PushFont(ui::fonts().code);
         for (const auto& l : Log::snapshot()) ImGui::TextUnformatted(l.c_str());
+        ImGui::PopFont();
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
         ImGui::End();
     }
@@ -408,6 +425,7 @@ private:
     OrbitCamera camera_{{0, 0.0f, 0}, 0.6f, 0.3f, 3.1f};
 
     std::vector<std::string> effects_;
+    ui::GlslEditor editor_;
     std::string current_, source_, error_, objPath_, texPath_;
     std::vector<UniformParam> params_;
     long long stamp_ = 0;

@@ -27,6 +27,7 @@
 #include "scene/MeshData.h"
 #include "spatial/Bvh.h"
 #include <imgui.h>
+#include "ui/Theme.h"
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -488,23 +489,23 @@ private:
         ImGui::Combo("Strategy", &s.misMode, modes, 3);
         ImGui::SliderFloat("Clamp", &s.clamp, 0.0f, 50.0f, s.clamp > 0 ? "%.1f" : "off");
         ImGui::SeparatorText("Display");
-        ImGui::SliderFloat("Exposure (EV)", &exposure_, -4.0f, 4.0f);
+        ui::slider("Exposure (EV)", &exposure_, -4.0f, 4.0f);
         const char* tm[] = {"ACES", "Filmic (Hable)", "Clamp"};
         ImGui::Combo("Tone curve", &tonemap_, tm, 3);
         ImGui::SeparatorText("Camera");
-        ImGui::SliderFloat("Field of view", &s.fovDeg, 15.0f, 90.0f, "%.0f deg");
-        ImGui::SliderFloat("Aperture", &s.aperture, 0.0f, 0.3f, "%.3f");
+        ui::slider("Field of view", &s.fovDeg, 15.0f, 90.0f, "%.0f deg");
+        ui::slider("Aperture", &s.aperture, 0.0f, 0.3f, "%.3f");
         bool af = s.autoFocus != 0;
         if (ImGui::Checkbox("Focus on orbit target", &af)) s.autoFocus = af;
-        if (!af) ImGui::SliderFloat("Focus distance", &s.focusDist, 0.5f, 30.0f);
+        if (!af) ui::slider("Focus distance", &s.focusDist, 0.5f, 30.0f);
         ImGui::SeparatorText("Lighting");
-        ImGui::SliderFloat("Light intensity", &s.lightIntensity, 0.0f, 60.0f);
+        ui::slider("Light intensity", &s.lightIntensity, 0.0f, 60.0f);
         ImGui::ColorEdit3("Light colour", s.lightColor);
-        ImGui::SliderFloat("Light size", &s.lightSize, 0.1f, 5.0f);
-        ImGui::SliderFloat("Light height", &s.lightHeight, 1.5f, 10.0f);
+        ui::slider("Light size", &s.lightSize, 0.1f, 5.0f);
+        ui::slider("Light height", &s.lightHeight, 1.5f, 10.0f);
         bool sky = s.skyOn != 0;
         if (ImGui::Checkbox("Sky", &sky)) s.skyOn = sky;
-        if (sky) { ImGui::SameLine(); ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##sky", &s.skyIntensity, 0.0f, 3.0f); }
+        if (sky) { ImGui::SameLine(); ImGui::SetNextItemWidth(-1); ui::slider("##sky", &s.skyIntensity, 0.0f, 3.0f); }
         ImGui::PopItemWidth();
         ImGui::End();
     }
@@ -514,13 +515,13 @@ private:
         int type = (int)m.type;
         if (ImGui::Combo("Type", &type, types, 3)) m.type = (float)type;
         ImGui::ColorEdit3(type == 2 ? "Tint" : "Colour", m.albedo);
-        if (type == 1) ImGui::SliderFloat("Roughness", &m.roughness, 0.0f, 1.0f);
-        if (type == 2) ImGui::SliderFloat("IOR", &m.ior, 1.0f, 2.5f);
+        if (type == 1) ui::slider("Roughness", &m.roughness, 0.0f, 1.0f);
+        if (type == 2) ui::slider("IOR", &m.ior, 1.0f, 2.5f);
         // Emission as colour * strength so the colour picker stays in [0, 1].
         float strength = std::max({m.emission[0], m.emission[1], m.emission[2]});
         float col[3] = {1, 1, 1};
         if (strength > 0) for (int i = 0; i < 3; ++i) col[i] = m.emission[i] / strength;
-        bool e = ImGui::SliderFloat("Emission", &strength, 0.0f, 20.0f);
+        bool e = ui::slider("Emission", &strength, 0.0f, 20.0f);
         e |= ImGui::ColorEdit3("Emission colour", col);
         if (e) for (int i = 0; i < 3; ++i) m.emission[i] = col[i] * strength;
     }
