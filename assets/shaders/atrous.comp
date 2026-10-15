@@ -43,6 +43,7 @@ void main() {
             if (q.x < 0 || q.y < 0 || q.x >= uWidth || q.y >= uHeight) continue;
 
             vec3 cQ = mean(imageLoad(uIn, q));
+            if (any(isnan(cQ)) || any(isinf(cQ))) continue;   // a non-finite tap would poison the sum
             vec3 aQ = mean(imageLoad(uAlbedo, q));
             vec3 nQraw = imageLoad(uNormal, q).rgb;
             float nLenQ = length(nQraw);

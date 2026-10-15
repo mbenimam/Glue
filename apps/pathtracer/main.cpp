@@ -30,9 +30,12 @@
 #include <imgui.h>
 #include "ui/Theme.h"
 #include <imgui_internal.h>
+#include <ImGuizmo.h>
+#include <cmath>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <cstring>
 
 using namespace glue;
@@ -56,17 +59,46 @@ constexpr int kMaterials = 2 + kMaxSpheres;   // 0 = mesh, 1 = ground, 2.. = sph
 // difference restarts the accumulation. Only 4-byte members, so there is no padding to differ.
 struct Settings {
     int maxBounces = 8, rrStart = 3, misMode = 2;
-    float clamp = 0.0f;
+    float clamp = 10.0f;   // caps indirect samples (caustic fireflies); 0 turns it off
     int skyOn = 1;
     float skyIntensity = 0.3f;
     float lightIntensity = 16.0f, lightColor[3] = {1.0f, 0.92f, 0.82f}, lightSize = 2.0f, lightHeight = 4.2f;
     float fovDeg = 38.0f, aperture = 0.035f, focusDist = 6.0f;
     int autoFocus = 1;
     float camTarget[3] = {}, yaw = 0, pitch = 0, distance = 0;
+    int envOn = 0, envBackground = 1, envRevision = 0;   // revision bumps when a map is (re)loaded
+    float envIntensity = 1.0f, envRotation = 0.0f;       // rotation in degrees about the vertical axis
+    float bgColor[3] = {0.08f, 0.08f, 0.09f};            // seen by the camera when the map is hidden
+    int groundOn = 1, lightOn = 1;
+    float lightX = 0.4f, lightZ = 0.4f;
+    float meshMat[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};   // mesh instance transform, column-major
     int sphereCount = 0;
     GpuSphere spheres[kMaxSpheres] = {};
     GpuMaterial mats[kMaterials] = {};
 };
+
+// Inverse of an affine column-major 4x4 (rotation/scale/shear + translation), and the matrix that
+// transforms normals (inverse transpose of the upper 3x3) in the same layout.
+void affineInverse(const float* m, Mat4& inv, Mat4& normal) {
+    float a = m[0], b = m[4], c = m[8], d = m[1], e = m[5], f = m[9], g = m[2], h = m[6], i = m[10];
+    float A = e * i - f * h, B = f * g - d * i, C = d * h - e * g;
+    float det = a * A + b * B + c * C;
+    float k = std::fabs(det) > 1e-12f ? 1.0f / det : 0.0f;
+    // rows of the inverse 3x3
+    float r[3][3] = {{A * k, (c * h - b * i) * k, (b * f - c * e) * k},
+                     {B * k, (a * i - c * g) * k, (c * d - a * f) * k},
+                     {C * k, (b * g - a * h) * k, (a * e - b * d) * k}};
+    inv = Mat4{};
+    normal = Mat4{};
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col) {
+            inv.at(row, col) = r[row][col];
+            normal.at(col, row) = r[row][col];        // transpose of the inverse
+        }
+    float t[3] = {m[12], m[13], m[14]};
+    for (int row = 0; row < 3; ++row)
+        inv.at(row, 3) = -(r[row][0] * t[0] + r[row][1] * t[1] + r[row][2] * t[2]);
+}
 
 GpuMaterial material(int type, float r, float g, float b, float rough = 0.0f, float ior = 1.5f) {
     GpuMaterial m{};
@@ -97,6 +129,7 @@ protected:
             else if (a == "--size" && more) std::sscanf(argv[++i], "%dx%d", &fixedW_, &fixedH_);
             else if (a == "--spp" && more) targetSpp_ = std::atoi(argv[++i]);
             else if (a == "--log-level" && more) Log::setLevel(Log::parse(argv[++i]));
+            else if (a == "--hdri" && more) { hdriArg_ = argv[++i]; settings_.envOn = 1; }
             else if (a == "--render-shot" && more) renderShot_ = argv[++i];
             else if (a == "--spf" && more) samplesPerFrame_ = std::max(1, std::atoi(argv[++i])), spfGiven = true;
             else if (a == "--model" && more) objPath_ = argv[++i];
@@ -124,6 +157,14 @@ protected:
         if (!loadCompute()) return false;
         atrousPath_ = assets_ + "/shaders/atrous.comp";
         if (!loadAtrous()) return false;
+        {   // The sampler is always bound, so start with a 1x1 black map.
+            const float black[4] = {0, 0, 0, 1};
+            rhi::TextureDesc d;
+            d.width = 1; d.height = 1; d.format = rhi::Format::RGBA32F; d.initialData = black; d.debugName = "pt environment (empty)";
+            envTex_ = device().createTexture(d);
+        }
+        if (!hdriArg_.empty()) loadHdri(hdriArg_);
+        else { std::string def = assets_ + "/hdri/venice_sunset_1k.hdr"; if (fileStamp(def)) loadHdri(def); }
         // Scene buffers. The BVH and triangle buffers are replaced by setMesh; spheres and
         // materials have a fixed size and are rewritten whenever the settings change.
         sphereBuf_ = storageBuffer(sizeof(Settings::spheres), nullptr, rhi::BufferUsage::CpuWrite, "pt spheres");
@@ -149,7 +190,7 @@ protected:
         // GPU objects must die while the device is still alive.
         display_.reset(); trace_.reset();
         accum_.reset(); outRt_.reset(); retired_.clear();
-        guideAlb_.reset(); guideNrm_.reset(); denA_.reset(); denB_.reset(); atrous_.reset();
+        guideAlb_.reset(); guideNrm_.reset(); denA_.reset(); denB_.reset(); atrous_.reset(); envTex_.reset();
         nodeBuf_.reset(); triBuf_.reset(); sphereBuf_.reset(); matBuf_.reset(); counterBuf_.reset();
     }
 
@@ -168,6 +209,7 @@ protected:
     }
 
     void onGui() override {
+        ImGuizmo::BeginFrame();
         ImGuiID dock = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
         if (!layoutBuilt_) { layoutBuilt_ = true; buildDefaultLayout(dock); }
         mainMenu();
@@ -265,6 +307,11 @@ protected:
         ctx.beginRenderPass(outRt_.get(), pass);
         ctx.bindPipeline(*display_);
         ctx.bindTexture(0, *shown);
+        ctx.bindTexture(1, *guideAlb_);
+        ctx.bindTexture(2, *guideNrm_);
+        display_->set("uShowFocus", showFocus_ ? 1 : 0);
+        display_->set("uFocusDist", settings_.focusDist);
+        display_->set("uFocusBand", focusBand_);
         display_->set("uExposure", exposure_);
         display_->set("uTonemap", tonemap_);
         ctx.draw(3);
@@ -319,7 +366,8 @@ private:
         Vec3 lo, hi; m.bounds(lo, hi);
         for (auto& p : m.positions) p = p - Vec3{(lo.x + hi.x) * 0.5f, lo.y, (lo.z + hi.z) * 0.5f};
         double t0 = nowMs();
-        Bvh bvh;
+        pickBvh_ = std::make_unique<Bvh>();      // kept after the upload: the picking ray tests against it
+        Bvh& bvh = *pickBvh_;
         bvh.build(m);
         bvhMs_ = nowMs() - t0;
         meshName_ = name;
@@ -369,6 +417,24 @@ private:
         d.initialData = data;
         d.debugName = name;
         return device().createBuffer(d);
+    }
+
+    // Loads an equirectangular .hdr into envTex_ and restarts the accumulation.
+    bool loadHdri(const std::string& path) {
+        int w = 0, h = 0;
+        std::vector<float> px;
+        if (!gfx::loadImageRgbaF32(path, w, h, px)) { Log::error("cannot read environment map " + path); return false; }
+        rhi::TextureDesc d;
+        d.width = w; d.height = h; d.format = rhi::Format::RGBA32F;
+        d.minFilter = d.magFilter = rhi::Filter::Linear; d.wrap = rhi::Wrap::ClampToEdge;
+        d.initialData = px.data(); d.debugName = "pt environment";
+        auto tex = device().createTexture(d);
+        if (!tex) { Log::error("cannot create the environment texture"); return false; }
+        envTex_ = std::move(tex);
+        envW_ = w; envH_ = h; hdriPath_ = path; hdriEdit_ = path;
+        ++settings_.envRevision;
+        Log::info("environment map " + path + " (" + std::to_string(w) + "x" + std::to_string(h) + ")");
+        return true;
     }
 
     bool loadAtrous() {
@@ -423,10 +489,22 @@ private:
         p.set("uLensRadius", s.aperture); p.set("uFocusDist", s.focusDist);
         p.set("uMaxBounces", s.maxBounces); p.set("uRRStart", s.rrStart);
         p.set("uMisMode", s.misMode); p.set("uClamp", s.clamp);
+        bool glass = false;
+        for (const GpuMaterial& m : s.mats) glass = glass || m.type == 2.0f;
+        p.set("uHasGlass", glass ? 1 : 0);
         p.set("uSkyOn", s.skyOn); p.set("uSkyIntensity", s.skyIntensity);
+        p.set("uEnvOn", (s.envOn && envW_ > 0) ? 1 : 0);
+        p.set("uEnvBackground", s.envBackground);
+        p.set("uEnvIntensity", s.envIntensity);
+        p.set("uEnvRotation", s.envRotation / 360.0f);
+        p.set("uBgColor", Vec3{s.bgColor[0], s.bgColor[1], s.bgColor[2]});
+        p.set("uGroundOn", s.groundOn); p.set("uLightOn", s.lightOn);
+        Mat4 meshInv, meshNormal;
+        affineInverse(s.meshMat, meshInv, meshNormal);
+        p.set("uMeshInv", meshInv); p.set("uMeshNormal", meshNormal);
         // Light: a square of side lightSize centred above the scene, normal pointing down.
         float half = s.lightSize * 0.5f;
-        p.set("uLightCorner", Vec3{0.4f - half, s.lightHeight, 0.4f - half});
+        p.set("uLightCorner", Vec3{s.lightX - half, s.lightHeight, s.lightZ - half});
         p.set("uLightU", Vec3{s.lightSize, 0, 0});
         p.set("uLightV", Vec3{0, 0, s.lightSize});
         p.set("uLightRadiance", Vec3{s.lightColor[0], s.lightColor[1], s.lightColor[2]} * s.lightIntensity);
@@ -440,6 +518,7 @@ private:
         ctx.bindStorageBuffer(2, *sphereBuf_);
         ctx.bindStorageBuffer(3, *matBuf_);
         ctx.bindStorageBuffer(4, *counterBuf_);
+        ctx.bindTexture(4, *envTex_);                 // environment map, sampler unit 4
     }
 
     void savePng(const std::string& path) {
@@ -554,7 +633,39 @@ private:
         bool af = s.autoFocus != 0;
         if (ImGui::Checkbox("Focus on orbit target", &af)) s.autoFocus = af;
         if (!af) ui::slider("Focus distance", &s.focusDist, 0.5f, 30.0f);
+        else ImGui::TextDisabled("Focus distance  %.2f", s.focusDist);
+        ImGui::Checkbox("Show focus plane", &showFocus_);
+        if (showFocus_) ui::slider("Plane width", &focusBand_, 0.02f, 2.0f, "%.2f");
+        ImGui::SeparatorText("Environment");
+        {
+            bool env = s.envOn != 0;
+            if (ImGui::Checkbox("Use HDRI", &env)) s.envOn = env;
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::InputText("##hdri", &hdriEdit_, ImGuiInputTextFlags_EnterReturnsTrue)) loadHdri(hdriEdit_);
+            if (ImGui::BeginCombo("Preset", hdriPath_.empty() ? "(none)" : std::filesystem::path(hdriPath_).filename().string().c_str())) {
+                std::error_code ec;
+                for (const auto& e : std::filesystem::directory_iterator(assets_ + "/hdri", ec))
+                    if (e.path().extension() == ".hdr" && ImGui::Selectable(e.path().filename().string().c_str(), e.path().string() == hdriPath_))
+                        loadHdri(e.path().string());
+                ImGui::EndCombo();
+            }
+            if (env && envW_ == 0) ImGui::TextDisabled("No environment map loaded yet.");
+            ui::slider("HDRI intensity", &s.envIntensity, 0.0f, 10.0f);
+            ui::slider("HDRI rotation", &s.envRotation, 0.0f, 360.0f, "%.0f deg");
+            bool bg = s.envBackground != 0;
+            if (ImGui::Checkbox("Show as background", &bg)) s.envBackground = bg;
+            if (!bg) ImGui::ColorEdit3("Background", s.bgColor);
+        }
         ImGui::SeparatorText("Lighting");
+        {
+            bool on = s.lightOn != 0;
+            if (ImGui::Checkbox("Area light", &on)) s.lightOn = on;
+            bool gr = s.groundOn != 0;
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Ground", &gr)) s.groundOn = gr;
+        }
+        ui::slider("Light X", &s.lightX, -6.0f, 6.0f);
+        ui::slider("Light Z", &s.lightZ, -6.0f, 6.0f);
         ui::slider("Light intensity", &s.lightIntensity, 0.0f, 60.0f);
         ImGui::ColorEdit3("Light colour", s.lightColor);
         ui::slider("Light size", &s.lightSize, 0.1f, 5.0f);
@@ -567,9 +678,9 @@ private:
     }
 
     void materialEditor(GpuMaterial& m) {
-        const char* types[] = {"Diffuse (Lambert)", "Metal (GGX)", "Glass (dielectric)"};
+        const char* types[] = {"Diffuse (Lambert)", "Metal (GGX)", "Glass (dielectric)", "Translucent (diffuse transmission)"};
         int type = (int)m.type;
-        if (ImGui::Combo("Type", &type, types, 3)) m.type = (float)type;
+        if (ImGui::Combo("Type", &type, types, 4)) m.type = (float)type;
         ImGui::ColorEdit3(type == 2 ? "Tint" : "Colour", m.albedo);
         if (type == 1) ui::slider("Roughness", &m.roughness, 0.0f, 1.0f);
         if (type == 2) ui::slider("IOR", &m.ior, 1.0f, 2.5f);
@@ -593,6 +704,56 @@ private:
         ui::sliderInt("##segs", &teapotSegments_, 2, 64, "teapot %d segs");
         ImGui::SameLine();
         if (ImGui::Button("Rebuild")) setMesh(makeTeapot(teapotSegments_), "Utah teapot");
+        ImGui::SeparatorText("Objects");
+        {
+            std::string meshLabel = "Mesh: " + meshName_;
+            if (ImGui::Selectable(meshLabel.c_str(), selected_ == 0)) select(0);
+            for (int i = 0; i < s.sphereCount; ++i) {
+                std::string label = "Sphere " + std::to_string(i + 1);
+                if (ImGui::Selectable(label.c_str(), selected_ == 1 + i)) select(1 + i);
+            }
+            if (ImGui::Selectable("Area light", selected_ == kSelLight)) select(kSelLight);
+            ImGui::TextDisabled("Click an object in the viewport to pick it. W / E / R switch the tool.");
+            ImGui::RadioButton("Move", &gizmoOp_, 0); ImGui::SameLine();
+            ImGui::RadioButton("Rotate", &gizmoOp_, 1); ImGui::SameLine();
+            ImGui::RadioButton("Scale", &gizmoOp_, 2);
+            ImGui::Checkbox("Local axes (mesh)", &gizmoLocal_);
+            if (ImGui::Button("Add sphere") && s.sphereCount < kMaxSpheres) {
+                int n = s.sphereCount++;
+                GpuSphere& sp = s.spheres[n];
+                sp = {};
+                sp.c[0] = camera_.target.x; sp.c[1] = camera_.target.y + 0.5f; sp.c[2] = camera_.target.z; sp.r = 0.5f;
+                sp.mat = (uint32_t)(2 + n);
+                s.mats[2 + n] = material(0, 0.7f, 0.7f, 0.7f);
+                select(1 + n);
+            }
+            ImGui::SameLine();
+            bool sphereSelected = selected_ >= 1 && selected_ < kSelLight && selected_ - 1 < s.sphereCount;
+            if (ImGui::Button("Remove selected") && sphereSelected) {
+                int i = selected_ - 1;
+                for (int j = i; j < s.sphereCount - 1; ++j) {
+                    s.spheres[j] = s.spheres[j + 1];
+                    s.spheres[j].mat = (uint32_t)(2 + j);
+                    s.mats[2 + j] = s.mats[3 + j];
+                }
+                --s.sphereCount;
+                s.spheres[s.sphereCount] = {};
+                if (editMat_ >= 2 + s.sphereCount) editMat_ = 0;
+                selected_ = -1;
+            }
+            if (selected_ == 0 && hasMesh_) {
+                float t[3], r[3], sc[3];
+                ImGuizmo::DecomposeMatrixToComponents(s.meshMat, t, r, sc);
+                bool ch = ImGui::DragFloat3("Position", t, 0.02f);
+                ch |= ImGui::DragFloat3("Rotation", r, 0.5f);
+                ch |= ImGui::DragFloat3("Scale", sc, 0.01f, 0.05f, 20.0f);
+                if (ch) ImGuizmo::RecomposeMatrixFromComponents(t, r, sc, s.meshMat);
+                if (ImGui::Button("Reset mesh transform")) {
+                    const float id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                    std::memcpy(s.meshMat, id, sizeof(id));
+                }
+            }
+        }
         ImGui::SeparatorText("Material");
         std::vector<std::string> names = {"Mesh", "Ground"};
         for (int i = 0; i < s.sphereCount; ++i) names.push_back("Sphere " + std::to_string(i + 1));
@@ -636,6 +797,106 @@ private:
         ImGui::End();
     }
 
+    static Vec3 xformPoint(const Mat4& m, const Vec3& v, float w) {
+        return {m.at(0, 0) * v.x + m.at(0, 1) * v.y + m.at(0, 2) * v.z + m.at(0, 3) * w,
+                m.at(1, 0) * v.x + m.at(1, 1) * v.y + m.at(1, 2) * v.z + m.at(1, 3) * w,
+                m.at(2, 0) * v.x + m.at(2, 1) * v.y + m.at(2, 2) * v.z + m.at(2, 3) * w};
+    }
+
+    // The camera exactly as the shader sees it (see setUniforms): position, basis and tan(fov / 2).
+    void cameraRays(float aspect, Vec3& pos, Vec3& fwd, Vec3& right, Vec3& up, float& tanX, float& tanY) const {
+        pos = camera_.position();
+        fwd = normalize(camera_.target - pos);
+        right = normalize(cross(fwd, {0, 1, 0}));
+        up = cross(right, fwd);
+        tanY = std::tan(radians(settings_.fovDeg) * 0.5f) * std::max(1.0f, (16.0f / 9.0f) / aspect);
+        tanX = tanY * aspect;
+    }
+
+    // Object under the mouse: -1 when none. Spheres and the light are analytic; the mesh uses the
+    // CPU BVH with the ray taken into mesh space.
+    int pickObject(float mx, float my) const {
+        float w = imageRect_[2], h = imageRect_[3];
+        if (w < 1 || h < 1) return -1;
+        Vec3 pos, fwd, right, up; float tanX, tanY;
+        cameraRays(w / h, pos, fwd, right, up, tanX, tanY);
+        float nx = (mx - imageRect_[0]) / w * 2.0f - 1.0f, ny = 1.0f - (my - imageRect_[1]) / h * 2.0f;
+        Vec3 dir = normalize(fwd + right * (nx * tanX) + up * (ny * tanY));
+        const Settings& s = settings_;
+        float best = 1e30f;
+        int id = -1;
+        for (int i = 0; i < s.sphereCount; ++i) {
+            Vec3 c{s.spheres[i].c[0], s.spheres[i].c[1], s.spheres[i].c[2]};
+            Vec3 oc = pos - c;
+            float b = dot(oc, dir), cc = dot(oc, oc) - s.spheres[i].r * s.spheres[i].r, disc = b * b - cc;
+            if (disc <= 0) continue;
+            float t = -b - std::sqrt(disc);
+            if (t > 0 && t < best) { best = t; id = 1 + i; }
+        }
+        if (hasMesh_ && pickBvh_) {
+            Mat4 inv, nrm;
+            affineInverse(s.meshMat, inv, nrm);
+            RayHit hit;
+            if (pickBvh_->intersect(xformPoint(inv, pos, 1.0f), xformPoint(inv, dir, 0.0f), hit, 1e-4f) && hit.t < best) {
+                best = hit.t; id = 0;
+            }
+        }
+        if (s.lightOn && std::fabs(dir.y) > 1e-6f) {
+            float t = (s.lightHeight - pos.y) / dir.y;
+            Vec3 q = pos + dir * t;
+            float half = s.lightSize * 0.5f;
+            if (t > 0 && t < best && std::fabs(q.x - s.lightX) <= half && std::fabs(q.z - s.lightZ) <= half) { best = t; id = kSelLight; }
+        }
+        return id;
+    }
+
+    void select(int id) {
+        selected_ = id;
+        if (id == 0) editMat_ = 0;
+        else if (id >= 1 && id < kSelLight) editMat_ = 1 + id;     // sphere i uses material slot 2 + i
+    }
+
+    // Draws the manipulator over the viewport image and writes the result back into the settings.
+    void gizmo() {
+        if (selected_ < 0) return;
+        Settings& s = settings_;
+        float w = imageRect_[2], h = imageRect_[3];
+        if (w < 1 || h < 1) return;
+        Vec3 pos, fwd, right, up; float tanX, tanY;
+        cameraRays(w / h, pos, fwd, right, up, tanX, tanY);
+        Mat4 view = camera_.view();
+        Mat4 proj = perspective(2.0f * std::atan(tanY), w / h, camera_.znear, camera_.zfar);
+
+        float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        bool isSphere = selected_ >= 1 && selected_ < kSelLight;
+        int si = selected_ - 1;
+        if (selected_ == 0) { if (!hasMesh_) return; std::memcpy(m, s.meshMat, sizeof(m)); }
+        else if (isSphere) {
+            if (si >= s.sphereCount) return;
+            float r = s.spheres[si].r;
+            m[0] = m[5] = m[10] = r;
+            m[12] = s.spheres[si].c[0]; m[13] = s.spheres[si].c[1]; m[14] = s.spheres[si].c[2];
+        } else { m[12] = s.lightX; m[13] = s.lightHeight; m[14] = s.lightZ; }
+
+        // A sphere has no orientation and the light is axis aligned: only the mesh rotates.
+        ImGuizmo::OPERATION op = gizmoOp_ == 0 ? ImGuizmo::TRANSLATE : gizmoOp_ == 1 ? ImGuizmo::ROTATE : ImGuizmo::SCALE;
+        if (selected_ != 0 && op == ImGuizmo::ROTATE) op = ImGuizmo::TRANSLATE;
+        if (selected_ == kSelLight) op = ImGuizmo::TRANSLATE;
+        ImGuizmo::MODE mode = (gizmoLocal_ && selected_ == 0) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
+
+        if (ImGuizmo::Manipulate(view.data(), proj.data(), op, mode, m)) {
+            if (selected_ == 0) std::memcpy(s.meshMat, m, sizeof(m));
+            else if (isSphere) {
+                GpuSphere& sp = s.spheres[si];
+                sp.c[0] = m[12]; sp.c[1] = m[13]; sp.c[2] = m[14];
+                float l0 = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+                float l1 = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+                float l2 = std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+                sp.r = std::clamp((l0 + l1 + l2) / 3.0f, 0.05f, 5.0f);
+            } else { s.lightX = m[12]; s.lightHeight = std::clamp(m[13], 1.5f, 10.0f); s.lightZ = m[14]; }
+        }
+    }
+
     void viewportPanel() {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
         ImGui::Begin("Viewport");
@@ -652,8 +913,26 @@ private:
             ImGui::Image((ImTextureID)(intptr_t)outRt_->color().imguiId(), img, {0, 1}, {1, 0});
         }
         viewportHovered_ = ImGui::IsItemHovered();
+        ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
+        imageRect_[0] = r0.x; imageRect_[1] = r0.y; imageRect_[2] = r1.x - r0.x; imageRect_[3] = r1.y - r0.y;
+        ImGuizmo::SetOrthographic(false);
+        ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
+        ImGuizmo::SetRect(imageRect_[0], imageRect_[1], imageRect_[2], imageRect_[3]);
+        gizmo();
+        bool gizmoBusy = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
         ImGuiIO& io = ImGui::GetIO();
-        if (viewportHovered_ && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) camera_.rotate(io.MouseDelta.x, io.MouseDelta.y);
+        // Click without a drag picks; clicking empty space clears. The gizmo owns the mouse while it is hot.
+        if (viewportHovered_ && !gizmoBusy && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+            if (d.x * d.x + d.y * d.y < 16.0f) select(pickObject(io.MousePos.x, io.MousePos.y));
+        }
+        if (viewportHovered_ && !io.WantTextInput) {
+            if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoOp_ = 0;
+            if (ImGui::IsKeyPressed(ImGuiKey_E)) gizmoOp_ = 1;
+            if (ImGui::IsKeyPressed(ImGuiKey_R)) gizmoOp_ = 2;
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) selected_ = -1;
+        }
+        if (viewportHovered_ && !gizmoBusy && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) camera_.rotate(io.MouseDelta.x, io.MouseDelta.y);
         if (viewportHovered_ && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
             // Pan the orbit target in the camera plane.
             Vec3 fwd = normalize(camera_.target - camera_.position());
@@ -674,6 +953,18 @@ private:
     std::unique_ptr<rhi::Pipeline> atrous_;
     std::string atrousPath_;
     int denoisePasses_ = 0;
+    std::unique_ptr<rhi::Texture> envTex_;        // equirectangular map, RGBA32F; 1x1 black until one is loaded
+    std::string hdriPath_, hdriEdit_;
+    int envW_ = 0, envH_ = 0;
+    std::string hdriArg_;
+    std::unique_ptr<Bvh> pickBvh_;
+    static constexpr int kSelLight = 100;
+    int selected_ = -1;              // -1 nothing, 0 the mesh, 1.. a sphere, kSelLight the area light
+    int gizmoOp_ = 0;                // 0 move, 1 rotate, 2 scale
+    bool gizmoLocal_ = false;
+    float imageRect_[4] = {};        // the viewport image on screen: x, y, w, h
+    bool showFocus_ = false;     // tint the pixels on the focus plane (display only)
+    float focusBand_ = 0.15f;
     float denSigmaC_ = 0.2f, denSigmaA_ = 0.2f, denSigmaN_ = 32.0f;
     std::unique_ptr<rhi::RenderTarget> outRt_;                // tonemapped RGBA8 shown in the viewport
     std::vector<std::unique_ptr<rhi::RenderTarget>> retired_; // replaced outputs, freed next frame

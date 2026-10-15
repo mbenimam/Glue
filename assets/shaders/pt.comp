@@ -32,6 +32,14 @@ uniform vec3 uCamPos, uCamRight, uCamUp, uCamFwd;
 uniform float uTanHalfX, uTanHalfY;     // tan(fov / 2) horizontally and vertically
 uniform float uLensRadius, uFocusDist;  // thin lens: aperture radius and distance of the sharp plane
 uniform int uMaxBounces, uRRStart;
+layout(binding = 4) uniform sampler2D uEnv;     // equirectangular environment map (linear radiance)
+uniform int uEnvOn, uEnvBackground;      // use the map for lighting; show it to the camera
+uniform float uEnvIntensity, uEnvRotation;   // scale, and rotation about the vertical axis in turns
+uniform vec3 uBgColor;                   // what the camera sees when the map is hidden
+uniform int uGroundOn, uLightOn;
+uniform mat4 uMeshInv;                   // world -> mesh space (the mesh is an instance with a transform)
+uniform mat4 uMeshNormal;                // upper 3x3: mesh -> world for normals (inverse transpose)
+uniform int uHasGlass;                  // 1 when a glass material can be in the scene: shadows then pass through it
 uniform int uMisMode;                   // 0 BSDF sampling only, 1 light sampling only, 2 MIS
 uniform float uClamp;                   // > 0: cap indirect contributions (biased, kills fireflies)
 uniform int uSkyOn;
@@ -42,6 +50,7 @@ uniform int uCountRays;
 
 const float PI = 3.14159265358979;
 const float EPS = 1e-4;
+const float BARY_EPS = 1e-6;   // edge tolerance of the triangle test
 const float INF = 1e30;
 
 shared uint sRays;
@@ -79,6 +88,7 @@ bool hitSphere(vec3 ro, vec3 rd, vec4 s, float tmax, out float t) {
 
 // Rectangle corner + s*U + t*V, s,t in [0,1]; U and V are perpendicular.
 bool hitLight(vec3 ro, vec3 rd, float tmax, out float t) {
+    if (uLightOn == 0) { t = 0.0; return false; }
     vec3 n = cross(uLightU, uLightV);
     float dn = dot(rd, n);
     if (abs(dn) < 1e-8) return false;
@@ -99,9 +109,12 @@ bool hitAabb(vec3 ro, vec3 invDir, vec3 lo, vec3 hi, float tmax, out float tnear
 
 // Walks the BVH (near child first, far child on a small stack). Returns the triangle index or
 // -1; with `anyHit` it stops at the first triangle closer than tmax (shadow rays).
-int traceMesh(vec3 ro, vec3 rd, inout float tmax, out vec2 bary, bool anyHit) {
+int traceMesh(vec3 roW, vec3 rdW, inout float tmax, out vec2 bary, bool anyHit) {
     bary = vec2(0.0);
     if (uHasMesh == 0) return -1;
+    // The ray in mesh space. rd is not renormalised, so t is the same in both spaces.
+    vec3 ro = (uMeshInv * vec4(roW, 1.0)).xyz;
+    vec3 rd = (uMeshInv * vec4(rdW, 0.0)).xyz;
     vec3 inv = 1.0 / vec3(abs(rd.x) > 1e-12 ? rd.x : 1e-12, abs(rd.y) > 1e-12 ? rd.y : 1e-12,
                           abs(rd.z) > 1e-12 ? rd.z : 1e-12);
     float tn;
@@ -122,10 +135,12 @@ int traceMesh(vec3 ro, vec3 rd, inout float tmax, out vec2 bary, bool anyHit) {
                 float inv_det = 1.0 / det;
                 vec3 s = ro - tri.v0.xyz;
                 float u = dot(s, p) * inv_det;
-                if (u < 0.0 || u > 1.0) continue;
+                // A small slack on the edge tests: a ray through a shared edge must hit one of the two
+                // triangles. With exact tests, rounding can miss both and leak to the sky (isolated pixels).
+                if (u < -BARY_EPS || u > 1.0 + BARY_EPS) continue;
                 vec3 q = cross(s, tri.e1.xyz);
                 float v = dot(rd, q) * inv_det;
-                if (v < 0.0 || u + v > 1.0) continue;
+                if (v < -BARY_EPS || u + v > 1.0 + BARY_EPS) continue;
                 float t = dot(tri.e2.xyz, q) * inv_det;
                 if (t > EPS && t < tmax) {
                     tmax = t; best = int(i); bary = vec2(u, v);
@@ -155,7 +170,7 @@ int traceMesh(vec3 ro, vec3 rd, inout float tmax, out vec2 bary, bool anyHit) {
 bool closestHit(vec3 ro, vec3 rd, out Hit h) {
     gRays++;
     h.t = INF; h.mat = -2; h.ng = vec3(0, 1, 0); h.ns = h.ng;
-    if (abs(rd.y) > 1e-8) {                         // ground plane y = 0
+    if (uGroundOn != 0 && abs(rd.y) > 1e-8) {       // ground plane y = 0
         float t = -ro.y / rd.y;
         if (t > EPS && t < h.t) { h.t = t; h.ng = vec3(0, 1, 0); h.ns = h.ng; h.mat = uGroundMat; }
     }
@@ -174,8 +189,9 @@ bool closestHit(vec3 ro, vec3 rd, out Hit h) {
     int tri = traceMesh(ro, rd, h.t, bary, false);
     if (tri >= 0) {
         Tri tr = tris[tri];
-        h.ng = normalize(cross(tr.e1.xyz, tr.e2.xyz));
-        h.ns = normalize((1.0 - bary.x - bary.y) * tr.n0.xyz + bary.x * tr.n1.xyz + bary.y * tr.n2.xyz);
+        mat3 nm = mat3(uMeshNormal);
+        h.ng = normalize(nm * cross(tr.e1.xyz, tr.e2.xyz));
+        h.ns = normalize(nm * ((1.0 - bary.x - bary.y) * tr.n0.xyz + bary.x * tr.n1.xyz + bary.y * tr.n2.xyz));
         h.mat = uMeshMat;
     }
     return h.mat != -2;
@@ -185,15 +201,23 @@ bool closestHit(vec3 ro, vec3 rd, out Hit h) {
 bool occluded(vec3 ro, vec3 rd, float dist) {
     gRays++;
     float tmax = dist;
-    if (abs(rd.y) > 1e-8) { float t = -ro.y / rd.y; if (t > EPS && t < tmax) return true; }
+    if (uGroundOn != 0 && abs(rd.y) > 1e-8) { float t = -ro.y / rd.y; if (t > EPS && t < tmax) return true; }
     for (int i = 0; i < uSphereCount; ++i) { float t; if (hitSphere(ro, rd, spheres[i].centerRadius, tmax, t)) return true; }
     vec2 bary;
     return traceMesh(ro, rd, tmax, bary, true) >= 0;
 }
 
 // ---------------------------------------------------------------- sky
+// Equirectangular lookup. Texture rows start at the bottom (v = 0 is straight down).
+vec3 envLookup(vec3 d) {
+    float u = atan(d.z, d.x) / (2.0 * PI) + 0.5 + uEnvRotation;
+    float v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+    return textureLod(uEnv, vec2(fract(u), 1.0 - v), 0.0).rgb * uEnvIntensity;
+}
+
 vec3 sky(vec3 d) {
     if (uSkyOn == 0) return vec3(0.0);
+    if (uEnvOn != 0) return envLookup(d);
     float up = clamp(d.y, -1.0, 1.0);
     vec3 zenith = vec3(0.22, 0.42, 0.85), horizon = vec3(0.85, 0.88, 0.95), ground = vec3(0.30, 0.28, 0.26);
     vec3 c = up > 0.0 ? mix(horizon, zenith, pow(up, 0.6)) : mix(horizon, ground, pow(-up, 0.4));
@@ -219,7 +243,26 @@ float powerHeuristic(float a, float b) { float a2 = a * a; return a2 / (a2 + b *
 // GGX / Trowbridge-Reitz microfacet distribution and Smith masking, alpha = roughness^2.
 float ggxD(float cosH, float a2) { float d = cosH * cosH * (a2 - 1.0) + 1.0; return a2 / (PI * d * d); }
 float smithG1(float cosV, float a2) { return 2.0 * cosV / (cosV + sqrt(a2 + (1.0 - a2) * cosV * cosV)); }
-vec3 schlick(vec3 f0, float c) { return f0 + (1.0 - f0) * pow(1.0 - c, 5.0); }
+vec3 schlick(vec3 f0, float c) { return f0 + (1.0 - f0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0); }
+
+// Light reaching the shade point along a shadow ray: glass passes it, tinted and reduced by
+// Fresnel, and every other surface blocks it. The ray is kept straight through glass (no
+// refraction), which is an approximation. Returns false when blocked.
+bool shadowTransmit(vec3 ro, vec3 rd, float dist, out vec3 tr) {
+    tr = vec3(1.0);
+    for (int k = 0; k < 8; ++k) {
+        Hit h;
+        if (!closestHit(ro, rd, h) || h.t >= dist || h.mat == -1) return true;   // nothing in the way
+        Material m = materials[h.mat];
+        if (int(m.albedo.w) != 2) return false;                                  // opaque: blocked
+        float F = schlick(vec3(0.04), abs(dot(rd, h.ng))).x;
+        tr *= m.albedo.rgb * (1.0 - F);
+        dist -= h.t;
+        ro = ro + rd * (h.t + EPS);
+        if (dist <= 2.0 * EPS) return true;
+    }
+    return false;                                                                // too many layers
+}
 
 bool isDelta(Material m) {
     int type = int(m.albedo.w);
@@ -240,6 +283,10 @@ vec3 albedoAt(Material m, vec3 p) {
 vec3 evalBsdf(Material m, vec3 alb, vec3 n, vec3 wo, vec3 wi, out float pdf) {
     float cosI = dot(n, wi), cosO = dot(n, wo);
     pdf = 0.0;
+    if (int(m.albedo.w) == 3) {                     // translucent: both hemispheres, f = albedo / 2pi
+        pdf = 0.5 * abs(cosI) / PI;
+        return alb / (2.0 * PI) * abs(cosI);
+    }
     if (cosI <= 0.0 || cosO <= 0.0) return vec3(0.0);
     if (int(m.albedo.w) == 0) {
         pdf = cosI / PI;
@@ -249,7 +296,7 @@ vec3 evalBsdf(Material m, vec3 alb, vec3 n, vec3 wo, vec3 wi, out float pdf) {
     vec3 h = normalize(wo + wi);
     float cosH = dot(n, h), oh = dot(wo, h);
     float D = ggxD(cosH, a2);
-    pdf = D * cosH / (4.0 * oh);
+    pdf = smithG1(cosO, a2) * D / (4.0 * cosO);          // visible-normal density
     return D * smithG1(cosI, a2) * smithG1(cosO, a2) * schlick(alb, oh) / (4.0 * cosO);
 }
 
@@ -270,23 +317,47 @@ bool sampleBsdf(Material m, vec3 alb, vec3 n, vec3 ng, vec3 wo, bool frontFace, 
         weight = alb;
         return dot(wi, ng) > 0.0;
     }
+    if (type == 3) {
+        // Translucent: a cosine-weighted direction on either side, each with probability 1/2.
+        // f = albedo / 2pi on both sides, so reflectance + transmittance = albedo, with no energy gain.
+        vec2 u = rnd2();
+        float r = sqrt(u.x), phi = 2.0 * PI * u.y;
+        vec3 local = vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u.x)));
+        if (rnd() < 0.5) local.z = -local.z;
+        wi = toWorld(local, n);
+        pdf = 0.5 * abs(local.z) / PI;
+        weight = alb;
+        return true;
+    }
     if (type == 1) {
         if (delta) {                                   // polished mirror
             wi = reflect(-wo, n);
             weight = schlick(alb, max(dot(n, wo), 0.0));
             return dot(wi, ng) > 0.0;
         }
-        // Sample a microfacet normal h with density D(h) cos(theta_h), reflect wo about it.
+        // Rough metal: sample the visible normals (Heitz 2018) and reflect wo about the sampled h.
+        // The weight is F * G1(wi) <= 1. Sampling D(h) cos(theta_h) instead gives a weight with
+        // 1 / cos(theta_h), which is unbounded and produced isolated, persistent bright pixels.
         float a = m.emission.w * m.emission.w, a2 = a * a;
+        vec3 tt, bb; basis(n, tt, bb);
+        vec3 woL = vec3(dot(wo, tt), dot(wo, bb), dot(wo, n));
+        vec3 Vh = normalize(vec3(a * woL.x, a * woL.y, woL.z));
+        float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+        vec3 T1 = lensq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+        vec3 T2 = cross(Vh, T1);
         vec2 u = rnd2();
-        float cosH = sqrt((1.0 - u.x) / (1.0 + (a2 - 1.0) * u.x));
-        float sinH = sqrt(max(0.0, 1.0 - cosH * cosH)), phi = 2.0 * PI * u.y;
-        vec3 h = toWorld(vec3(sinH * cos(phi), sinH * sin(phi), cosH), n);
+        float r = sqrt(u.x), phi = 2.0 * PI * u.y;
+        float t1 = r * cos(phi), t2 = r * sin(phi);
+        float sv = 0.5 * (1.0 + Vh.z);
+        t2 = (1.0 - sv) * sqrt(max(0.0, 1.0 - t1 * t1)) + sv * t2;
+        vec3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+        vec3 hL = normalize(vec3(a * Nh.x, a * Nh.y, max(0.0, Nh.z)));
+        vec3 h = toWorld(hL, n);
         wi = reflect(-wo, h);
         float cosI = dot(n, wi), cosO = dot(n, wo), oh = dot(wo, h);
         if (cosI <= 0.0 || cosO <= 0.0 || oh <= 0.0 || dot(wi, ng) <= 0.0) return false;
-        pdf = ggxD(cosH, a2) * cosH / (4.0 * oh);
-        weight = schlick(alb, oh) * smithG1(cosI, a2) * smithG1(cosO, a2) * oh / (cosO * cosH);
+        pdf = smithG1(cosO, a2) * ggxD(hL.z, a2) / (4.0 * cosO);
+        weight = schlick(alb, oh) * smithG1(cosI, a2);
         return true;
     }
     // Smooth dielectric: reflect with probability F (exact Fresnel), otherwise refract.
@@ -312,20 +383,34 @@ bool sampleBsdf(Material m, vec3 alb, vec3 n, vec3 ng, vec3 wo, bool frontFace, 
     return true;
 }
 
+// Caps an indirect sample by scaling all three channels by the same factor. A per-channel min()
+// would shift the hue of a bright firefly (green or blue speckles on coloured surfaces).
+vec3 capIndirect(vec3 c, int depth) {
+    if (uClamp <= 0.0 || depth == 0) return c;
+    float m = max(c.r, max(c.g, c.b));
+    return m > uClamp ? c * (uClamp / m) : c;
+}
+
 // ---------------------------------------------------------------- integrator
 // firstAlb / firstN: albedo and shading normal of the camera ray's first hit, for the denoiser.
-vec3 radiance(vec3 ro, vec3 rd, out vec3 firstAlb, out vec3 firstN) {
+// firstZ: distance of that hit along the camera axis (0 for a miss), for the focus-plane view.
+vec3 radiance(vec3 ro, vec3 rd, out vec3 firstAlb, out vec3 firstN, out float firstZ) {
     vec3 L = vec3(0.0), T = vec3(1.0);
-    firstAlb = vec3(0.0); firstN = vec3(0.0);
+    firstAlb = vec3(0.0); firstN = vec3(0.0); firstZ = 0.0;
     float prevPdf = 0.0;
     bool prevDelta = true;                             // the camera ray counts as "specular"
     vec3 lightN = normalize(cross(uLightU, uLightV));
     float lightArea = length(cross(uLightU, uLightV));
     for (int depth = 0; depth <= uMaxBounces; ++depth) {
         Hit h;
-        if (!closestHit(ro, rd, h)) { L += T * sky(rd); break; }
+        if (!closestHit(ro, rd, h)) {
+            vec3 bg = (depth == 0 && uEnvOn != 0 && uEnvBackground == 0) ? uBgColor : sky(rd);
+            L += capIndirect(T * bg, depth);
+            break;
+        }
         if (depth == 0) {
             firstN = h.ns;
+            firstZ = h.t * dot(rd, uCamFwd);
             firstAlb = h.mat >= 0 ? materials[h.mat].albedo.rgb : vec3(0.0);
         }
         vec3 p = ro + h.t * rd;
@@ -342,7 +427,7 @@ vec3 radiance(vec3 ro, vec3 rd, out vec3 firstAlb, out vec3 firstN) {
                 }
                 c = T * uLightRadiance * w;
             }
-            L += (uClamp > 0.0 && depth > 0) ? min(c, vec3(uClamp)) : c;
+            L += capIndirect(c, depth);
             break;                                     // the light does not reflect
         }
 
@@ -352,23 +437,28 @@ vec3 radiance(vec3 ro, vec3 rd, out vec3 firstAlb, out vec3 firstN) {
         if (dot(ns, -rd) <= 0.0) ns = ng;              // interpolated normal facing away: fall back
         vec3 wo = -rd;
         vec3 alb = albedoAt(m, p);
-        L += T * m.emission.rgb;                       // emissive surfaces (not light-sampled: full weight)
+        L += capIndirect(T * m.emission.rgb, depth);   // emissive surfaces (not light-sampled: full weight)
 
         // Next-event estimation: one shadow ray towards a uniform point on the light.
-        if (!isDelta(m) && uMisMode != 0) {
+        if (!isDelta(m) && uMisMode != 0 && uLightOn != 0) {
             vec3 lp = uLightCorner + rnd() * uLightU + rnd() * uLightV;
             vec3 toL = lp - p;
             float d2 = dot(toL, toL), d = sqrt(d2);
             vec3 wl = toL / d;
             float cosL = -dot(wl, lightN);
-            if (cosL > 0.0 && dot(wl, ng) > 0.0) {
+            bool translucent = int(m.albedo.w) == 3;
+            if (cosL > 0.0 && (translucent || dot(wl, ng) > 0.0)) {
                 float bsdfPdf;
                 vec3 f = evalBsdf(m, alb, ns, wo, wl, bsdfPdf);
-                if (any(greaterThan(f, vec3(0.0))) && !occluded(p + ng * EPS, wl, d - 2.0 * EPS)) {
+                vec3 origin = p + (dot(wl, ng) > 0.0 ? ng : -ng) * EPS;
+                vec3 tr = vec3(1.0);
+                bool lit = uHasGlass != 0 ? shadowTransmit(origin, wl, d - 2.0 * EPS, tr)
+                                          : !occluded(origin, wl, d - 2.0 * EPS);
+                if (any(greaterThan(f, vec3(0.0))) && lit) {
                     float lightPdf = d2 / (cosL * lightArea);   // area pdf 1/A converted to solid angle
                     float w = uMisMode == 2 ? powerHeuristic(lightPdf, bsdfPdf) : 1.0;
-                    c = T * f * uLightRadiance * (w / lightPdf);
-                    L += (uClamp > 0.0 && depth > 0) ? min(c, vec3(uClamp)) : c;
+                    c = T * f * tr * uLightRadiance * (w / lightPdf);
+                    L += capIndirect(c, depth);
                 }
             }
         }
@@ -417,14 +507,21 @@ void main() {
             dir = normalize(focus - ro);
         }
         vec3 alb, nrm;
-        vec3 L = radiance(ro, dir, alb, nrm);
-        if (any(isnan(L)) || any(isinf(L))) L = vec3(0.0);
+        float z;
+        vec3 L = radiance(ro, dir, alb, nrm, z);
+        bool bad = any(isnan(L)) || any(isinf(L));      // dropped below, not counted as black
+        if (bad) L = vec3(0.0);
         vec4 prev = uFrame == 0 ? vec4(0.0) : imageLoad(uAccum, px);
-        imageStore(uAccum, px, prev + vec4(L, 1.0));
+        imageStore(uAccum, px, prev + vec4(L, bad ? 0.0 : 1.0));
+        // A non-finite guide would poison every filter tap that reads this pixel: drop it.
+        if (any(isnan(alb)) || any(isinf(alb))) alb = vec3(0.0);
+        if (any(isnan(nrm)) || any(isinf(nrm))) nrm = vec3(0.0);
         vec4 gA = uFrame == 0 ? vec4(0.0) : imageLoad(uGuideAlbedo, px);
-        imageStore(uGuideAlbedo, px, gA + vec4(alb, 1.0));
+        // The guide count and the depth are over camera rays that hit something.
+        bool hit = z > 0.0 && !isnan(z) && !isinf(z);
+        imageStore(uGuideAlbedo, px, gA + vec4(alb, hit ? 1.0 : 0.0));
         vec4 gN = uFrame == 0 ? vec4(0.0) : imageLoad(uGuideNormal, px);
-        imageStore(uGuideNormal, px, gN + vec4(nrm, 0.0));
+        imageStore(uGuideNormal, px, gN + vec4(nrm, hit ? z : 0.0));   // alpha: sum of hit depths
     }
     if (uCountRays != 0) {
         atomicAdd(sRays, gRays);

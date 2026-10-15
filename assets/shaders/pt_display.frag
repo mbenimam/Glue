@@ -5,6 +5,10 @@
 in vec2 vUv;
 out vec4 fragColor;
 layout(binding = 0) uniform sampler2D uAccum;   // rgb = sum of samples, a = number of samples
+layout(binding = 1) uniform sampler2D uGuideAlbedo;   // a = number of camera rays that hit something
+layout(binding = 2) uniform sampler2D uGuideNormal;   // a = sum of their depths along the camera axis
+uniform int uShowFocus;                         // 1: tint the focus plane
+uniform float uFocusDist, uFocusBand;           // plane distance and half-width of the tint, in world units
 uniform float uExposure;                        // stops (EV): radiance is multiplied by 2^EV
 uniform int uTonemap;                           // 0 ACES, 1 filmic (Hable), 2 clamp
 
@@ -29,5 +33,15 @@ void main() {
     if (uTonemap == 0) c = aces(c);
     else if (uTonemap == 1) c = clamp(hable(2.0 * c) / hable(vec3(11.2)), 0.0, 1.0);
     else c = clamp(c, 0.0, 1.0);
-    fragColor = vec4(srgb(c), 1.0);
+    c = srgb(c);
+    if (uShowFocus != 0) {
+        ivec2 px = ivec2(gl_FragCoord.xy);
+        float hits = texelFetch(uGuideAlbedo, px, 0).a;
+        if (hits > 0.0) {
+            float z = texelFetch(uGuideNormal, px, 0).a / hits;
+            float k = 1.0 - smoothstep(0.0, uFocusBand, abs(z - uFocusDist));   // 1 on the plane
+            c = mix(c, vec3(1.0, 0.1, 0.8), 0.65 * k);
+        }
+    }
+    fragColor = vec4(c, 1.0);
 }
