@@ -9,3 +9,4 @@ obj/
 graphify-out/
 compile_commands.json
 .claude/
+graphify-out/

@@ -3,7 +3,7 @@
 [![build](https://github.com/mbenimam/Glue/actions/workflows/build.yml/badge.svg)](https://github.com/mbenimam/Glue/actions/workflows/build.yml)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![OpenGL 4.5](https://img.shields.io/badge/OpenGL-4.5-5586a4)
-![tests](https://img.shields.io/badge/unit--test%20checks-5808-brightgreen)
+![tests](https://img.shields.io/badge/unit--test%20checks-5842-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **A small OpenGL engine written from scratch, and four real-time graphics apps built on it: a Shadertoy-style shader lab, an SPH fluid simulator, an adaptive quad-mesh simplifier and an interactive GPU path tracer.**
@@ -21,7 +21,7 @@ C++20 · OpenGL 4.5 · Premake5 · Dear ImGui · Linux (Wayland and X11) · MIT
 | **What** | One engine, four apps. The geometry, the spatial structures, the SPH kernels and the BVH are written here, not pulled from a library (no GLM, no Eigen, no libigl). |
 | **Hardest parts** | A compute-shader path tracer that keeps accumulating samples while you orbit the camera; an incompressible SPH solver (PCISPH); a half-edge mesh with a quad simplifier driven by curvature "fitmaps". |
 | **Measured** | Path tracer: 427 MRays/s at 1280x720 on an RX 580 (Mesa), 685 samples per pixel in 5 s. Quad simplifier: at 600 quads on a rounded box, the adaptive method cuts the worst-case error from 1.35% to 0.86% of the bounding-box diagonal compared with the uniform one. |
-| **Verified** | 5808 unit-test checks (BVH against brute force, SPH kernels integrate to 1, half-edge invariants after random edits), run in CI without a GPU. |
+| **Verified** | 5842 unit-test checks (BVH against brute force, SPH kernels integrate to 1, half-edge invariants after random edits), run in CI without a GPU. |
 
 ## The four apps
 
@@ -44,9 +44,14 @@ C++20 · OpenGL 4.5 · Premake5 · Dear ImGui · Linux (Wayland and X11) · MIT
 
 ## How it fits together
 
-![Engine modules and which app uses which](docs/assets/diagrams/architecture.png)
+![Engine layers: apps, engine modules, interfaces, backends](docs/assets/diagrams/architecture.png)
 
-Each app is a small class that overrides `onInit`, `onUpdate`, `onRender` and `onGui` of `glue::Application`. The window system comes from GLFW 3.4, built from source in the Premake script with both backends: native Wayland when `WAYLAND_DISPLAY` is set, X11 otherwise (`--platform wayland|x11` forces one).
+Two interfaces keep the engine independent of the platform:
+
+- **`platform::Window`** (`engine/src/platform/Window.h`) is the window, its event loop and its clock. The only implementation is GLFW 3.4 built from source, with native Wayland when `WAYLAND_DISPLAY` is set and X11 otherwise (`--platform wayland|x11` forces one). A Win32 or Cocoa window would be one more class behind `createWindow()`.
+- **`rhi::Device`** (`engine/src/rhi/Rhi.h`) is a small render hardware interface: buffers, textures, render targets, pipelines created from plain descriptions, and a `CommandContext` that records render passes, binds, draws, compute dispatches and barriers. The OpenGL 4.5 backend is `rhi/gl/GlDevice.cpp`. A **null backend** (`--backend null`) records the commands instead of running them, so the unit tests and whole apps run with no GPU. Vulkan and Direct3D 12 are not implemented; `Device::create` says so.
+
+Nothing outside `rhi/gl` includes an OpenGL header and nothing outside `platform/glfw` includes GLFW. `scripts/check-layering.sh` checks that in CI. Each app is a small class that overrides `onInit`, `onUpdate`, `onRender` and `onGui` of `glue::Application`, which owns one window and one device.
 
 ## How each app works
 
@@ -73,8 +78,8 @@ You need a C++20 compiler, `premake5` and the X11 development headers. `wayland-
 ```bash
 premake5 gmake
 make -C build config=release -j"$(nproc)"
-./bin/Release/tests          # 5808 checks, no GPU needed
-./bin/Release/gluelab        # also: sph, quadmesh, pathtracer
+./bin/Release/tests          # 5842 checks, no GPU needed
+./bin/Release/gluelab        # also: sph, quadmesh, pathtracer (add --backend null to run with no GPU)
 ```
 
 Every app accepts `--hidden --frames N --screenshot out.png` to render headless, which is how the images in this README were produced. `sph`, `quadmesh` and `pathtracer` also have `--bench`.
@@ -86,6 +91,7 @@ OpenGL 4.5 core is required (compute shaders, direct state access). I develop on
 - QuadMesh keeps boundary vertices frozen, so on the open teapot the adaptive method loses to the uniform one at aggressive reductions (see the table in [the benchmarks](docs/quadmesh-benchmarks.md)). A boundary operator is the next thing to add. A triangle-QEM baseline is more accurate than either quad method at the same vertex count; the point of the quad methods is regular quads, not distance.
 - SPH walls are a clamp with restitution, not boundary particles, so density is underestimated near walls. PCISPH has no GPU port yet.
 - The path tracer lets light-sampling rays stop at glass, so shadows behind glass come only from caustic paths. Fireflies from glass caustics settle only after a few thousand samples.
+- OpenGL is the only real graphics backend and GLFW the only window implementation. The interfaces are shaped so a Vulkan or Direct3D 12 backend and a native window fit behind them, but none exists yet, so the Vulkan side of the design is untested.
 - Linux only so far; the Premake script has Windows branches that I have not built.
 
 ## Documentation

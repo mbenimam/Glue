@@ -20,14 +20,12 @@
 #include "core/Assets.h"
 #include "core/File.h"
 #include "core/Log.h"
-#include "gfx/Shader.h"
+#include "gfx/ImageIO.h"
 #include "gfx/ShaderToy.h"
-#include "gfx/Texture.h"
+#include "rhi/Rhi.h"
 #include "scene/Camera.h"
 #include "scene/MeshData.h"
 #include "spatial/Bvh.h"
-#include <GLFW/glfw3.h>
-#include <stb_image_write.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -107,19 +105,27 @@ protected:
         if (targetSpp_ > 0) maxSpp_ = std::max(maxSpp_, targetSpp_);
         if (bench_) { fixedW_ = 1280; fixedH_ = 720; if (!spfGiven) samplesPerFrame_ = 4; }
 
-        std::string fs;
-        if (!readFile(assets_ + "/shaders/pt_display.frag", fs) || !display_.compileGraphics(kShadertoyVertex, fs)) {
-            Log::error("pt_display.frag: " + display_.error());
+        // Display pass: one full-screen triangle (the vertex shader reads gl_VertexID only).
+        rhi::GraphicsPipelineDesc dd;
+        dd.vertexSource = kShadertoyVertex;
+        dd.depth.test = false;
+        dd.depth.write = false;
+        dd.debugName = "pt display";
+        std::string err;
+        if (!readFile(assets_ + "/shaders/pt_display.frag", dd.fragmentSource) ||
+            !(display_ = device().createGraphicsPipeline(dd, &err))) {
+            Log::error("pt_display.frag: " + err);
             return false;
         }
         computePath_ = assets_ + "/shaders/pt.comp";
         if (!loadCompute()) return false;
-        glCreateVertexArrays(1, &emptyVao_);
-        GLuint bufs[5];
-        glCreateBuffers(5, bufs);
-        nodeBuf_ = bufs[0]; triBuf_ = bufs[1]; sphereBuf_ = bufs[2]; matBuf_ = bufs[3]; counterBuf_ = bufs[4];
+        // Scene buffers. The BVH and triangle buffers are replaced by setMesh; spheres and
+        // materials have a fixed size and are rewritten whenever the settings change.
+        sphereBuf_ = storageBuffer(sizeof(Settings::spheres), nullptr, rhi::BufferUsage::CpuWrite, "pt spheres");
+        matBuf_ = storageBuffer(sizeof(Settings::mats), nullptr, rhi::BufferUsage::CpuWrite, "pt materials");
         uint32_t zero = 0;
-        glNamedBufferStorage(counterBuf_, sizeof(uint32_t), &zero, GL_DYNAMIC_STORAGE_BIT | GL_MAP_READ_BIT);
+        counterBuf_ = storageBuffer(sizeof(uint32_t), &zero, rhi::BufferUsage::CpuWrite | rhi::BufferUsage::CpuRead,
+                                    "pt ray counter");
 
         defaultScene();
         if (strategy_ >= 0) settings_.misMode = std::min(strategy_, 2);
@@ -135,12 +141,10 @@ protected:
     }
 
     void onShutdown() override {
-        display_.destroy(); trace_.destroy();
-        accum_.destroy(); outFbo_.destroy();
-        GLuint bufs[5] = {nodeBuf_, triBuf_, sphereBuf_, matBuf_, counterBuf_};
-        glDeleteBuffers(5, bufs);
-        if (emptyVao_) glDeleteVertexArrays(1, &emptyVao_);
-        emptyVao_ = 0;
+        // GPU objects must die while the device is still alive.
+        display_.reset(); trace_.reset();
+        accum_.reset(); outRt_.reset(); retired_.clear();
+        nodeBuf_.reset(); triBuf_.reset(); sphereBuf_.reset(); matBuf_.reset(); counterBuf_.reset();
     }
 
     void onScroll(double, double dy) override {
@@ -148,6 +152,8 @@ protected:
     }
 
     void onUpdate(float) override {
+        // Images replaced during the last onRender were still referenced by that frame's GUI.
+        retired_.clear();
         // Hot reload of the tracer, like GlueLab's effects: save pt.comp, see the result.
         if (frame() % 30 == 0) {
             long long s = fileStamp(computePath_);
@@ -169,9 +175,17 @@ protected:
     void onRender() override {
         int w = fixedW_ > 0 ? fixedW_ : std::max(vpW_, 16);
         int h = fixedH_ > 0 ? fixedH_ : std::max(vpH_, 16);
-        if (w != accum_.width() || h != accum_.height()) {
-            accum_.create(w, h, GL_RGBA32F, GL_NEAREST, GL_CLAMP_TO_EDGE);
-            outFbo_.resize(w, h, GL_RGBA8);
+        if (!accum_ || w != accum_->width() || h != accum_->height()) {
+            rhi::TextureDesc a;
+            a.width = w; a.height = h; a.format = rhi::Format::RGBA32F;
+            a.minFilter = a.magFilter = rhi::Filter::Nearest; a.wrap = rhi::Wrap::ClampToEdge;
+            a.storage = true; a.debugName = "pt accumulation";
+            accum_ = device().createTexture(a);
+            // This frame's GUI already refers to the old output image: keep it alive until the next frame.
+            if (outRt_) retired_.push_back(std::move(outRt_));
+            rhi::RenderTargetDesc o;
+            o.width = w; o.height = h; o.colorFormat = rhi::Format::RGBA8; o.depth = false; o.debugName = "pt output";
+            outRt_ = device().createRenderTarget(o);
             reset();
         }
         // Change detection: the whole settings block, including the camera, byte for byte.
@@ -191,31 +205,32 @@ protected:
         int dispatches = changed ? 1 : samplesPerFrame_;
         if (targetSpp_ > 0) dispatches = std::min(dispatches, targetSpp_ - spp_);
         if (maxSpp_ > 0 && !bench_) dispatches = std::min(dispatches, maxSpp_ - spp_);
-        if (trace_.valid() && dispatches > 0) {
+        rhi::CommandContext& ctx = context();
+        if (trace_ && dispatches > 0) {
             if (bench_ && benchStart_ < 0) benchStart_ = nowMs();
             setUniforms(w, h);
-            glBindImageTexture(0, accum_.id(), 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
+            ctx.bindStorageImage(0, *accum_, rhi::Access::ReadWrite);
             for (int i = 0; i < dispatches; ++i) {
-                trace_.set("uFrame", spp_);
-                glDispatchCompute((w + 7) / 8, (h + 7) / 8, 1);
-                glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+                trace_->set("uFrame", spp_);
+                ctx.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                ctx.barrier(rhi::Barrier::StorageImage);
                 ++spp_;
             }
-            glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+            ctx.barrier(rhi::Barrier::TextureFetch);
             samplesThisWindow_ += (double)dispatches * w * h;
         }
 
         // Display pass: accumulation -> tonemapped RGBA8 shown in the viewport panel.
-        outFbo_.bind();
-        glDisable(GL_DEPTH_TEST);
-        display_.bind();
-        accum_.bind(0);
-        display_.set("uExposure", exposure_);
-        display_.set("uTonemap", tonemap_);
-        glBindVertexArray(emptyVao_);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        Framebuffer::unbind();
-        glEnable(GL_DEPTH_TEST);
+        rhi::RenderPassDesc pass;
+        pass.clearColor = false;    // the triangle covers every pixel
+        pass.clearDepth = false;
+        ctx.beginRenderPass(outRt_.get(), pass);
+        ctx.bindPipeline(*display_);
+        ctx.bindTexture(0, *accum_);
+        display_->set("uExposure", exposure_);
+        display_->set("uTonemap", tonemap_);
+        ctx.draw(3);
+        ctx.endRenderPass();
 
         // Throughput over half-second windows of wall clock time.
         double t = time();
@@ -283,8 +298,11 @@ private:
             put(gt[i].v0, t.v0); put(gt[i].e1, t.v1 - t.v0); put(gt[i].e2, t.v2 - t.v0);
             put(gt[i].n0, m.normals[id[0]]); put(gt[i].n1, m.normals[id[1]]); put(gt[i].n2, m.normals[id[2]]);
         }
-        glNamedBufferData(nodeBuf_, std::max<size_t>(32, bvh.nodes.size() * sizeof(BvhNode)), bvh.nodes.data(), GL_STATIC_DRAW);
-        glNamedBufferData(triBuf_, std::max<size_t>(96, gt.size() * sizeof(GpuTri)), gt.data(), GL_STATIC_DRAW);
+        // Never zero-sized: an empty mesh still binds a (zero-filled) buffer.
+        nodeBuf_ = bvh.nodes.empty() ? storageBuffer(sizeof(BvhNode), nullptr, {}, "pt bvh nodes")
+                                     : storageBuffer(bvh.nodes.size() * sizeof(BvhNode), bvh.nodes.data(), {}, "pt bvh nodes");
+        triBuf_ = gt.empty() ? storageBuffer(sizeof(GpuTri), nullptr, {}, "pt triangles")
+                             : storageBuffer(gt.size() * sizeof(GpuTri), gt.data(), {}, "pt triangles");
         hasMesh_ = !bvh.nodes.empty();
         Log::info(name + ": " + std::to_string(meshTris_) + " triangles, BVH " + std::to_string(bvhNodes_) +
                   " nodes, depth " + std::to_string(bvhDepth_) + ", built in " + std::to_string(bvhMs_) + " ms");
@@ -301,18 +319,34 @@ private:
 
     void uploadScene() {
         const Settings& s = applied_;
-        glNamedBufferData(sphereBuf_, sizeof(s.spheres), s.spheres, GL_DYNAMIC_DRAW);
-        glNamedBufferData(matBuf_, sizeof(s.mats), s.mats, GL_DYNAMIC_DRAW);
+        sphereBuf_->write(0, s.spheres, sizeof(s.spheres));
+        matBuf_->write(0, s.mats, sizeof(s.mats));
+    }
+
+    // A storage buffer of `bytes`, zero-filled when `data` is null. `extra` adds CPU access flags.
+    std::unique_ptr<rhi::Buffer> storageBuffer(size_t bytes, const void* data, rhi::BufferUsage extra, const char* name) {
+        rhi::BufferDesc d;
+        d.size = bytes;
+        d.usage = rhi::BufferUsage::Storage | extra;
+        d.initialData = data;
+        d.debugName = name;
+        return device().createBuffer(d);
     }
 
     bool loadCompute() {
         std::string src;
         computeStamp_ = fileStamp(computePath_);
         if (!readFile(computePath_, src)) { Log::error("cannot read " + computePath_); return false; }
-        if (!trace_.compileCompute(src)) {     // the previous program keeps running
-            Log::error("pt.comp: " + trace_.error());
-            return trace_.valid();
+        rhi::ComputePipelineDesc d;
+        d.source = src;
+        d.debugName = "pt.comp";
+        std::string err;
+        auto p = device().createComputePipeline(d, &err);
+        if (!p) {                              // the previous pipeline keeps running
+            Log::error("pt.comp: " + err);
+            return trace_ != nullptr;
         }
+        trace_ = std::move(p);
         Log::info("compiled " + computePath_);
         return true;
     }
@@ -321,7 +355,7 @@ private:
 
     void setUniforms(int w, int h) {
         const Settings& s = applied_;
-        Shader& p = trace_;
+        rhi::Pipeline& p = *trace_;
         Vec3 pos = camera_.position();
         Vec3 fwd = normalize(camera_.target - pos);
         Vec3 right = normalize(cross(fwd, {0, 1, 0}));
@@ -331,7 +365,7 @@ private:
         float aspect = (float)w / h;
         float tanY = std::tan(radians(s.fovDeg) * 0.5f) * std::max(1.0f, (16.0f / 9.0f) / aspect);
         p.set("uWidth", w); p.set("uHeight", h);
-        glProgramUniform1ui(p.id(), p.loc("uSeed"), seed_);
+        p.set("uSeed", seed_);
         p.set("uCamPos", pos); p.set("uCamRight", right); p.set("uCamUp", up); p.set("uCamFwd", fwd);
         p.set("uTanHalfX", tanY * aspect); p.set("uTanHalfY", tanY);
         p.set("uLensRadius", s.aperture); p.set("uFocusDist", s.focusDist);
@@ -347,18 +381,17 @@ private:
         p.set("uSphereCount", s.sphereCount); p.set("uHasMesh", hasMesh_ ? 1 : 0);
         p.set("uMeshMat", 0); p.set("uGroundMat", 1);
         p.set("uCountRays", bench_ ? 1 : 0);
-        p.bind();
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, nodeBuf_);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, triBuf_);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, sphereBuf_);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, matBuf_);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, counterBuf_);
+        rhi::CommandContext& ctx = context();
+        ctx.bindPipeline(p);
+        ctx.bindStorageBuffer(0, *nodeBuf_);
+        ctx.bindStorageBuffer(1, *triBuf_);
+        ctx.bindStorageBuffer(2, *sphereBuf_);
+        ctx.bindStorageBuffer(3, *matBuf_);
+        ctx.bindStorageBuffer(4, *counterBuf_);
     }
 
     void savePng(const std::string& path) {
-        auto px = outFbo_.readback();
-        stbi_flip_vertically_on_write(1);
-        if (stbi_write_png(path.c_str(), outFbo_.width(), outFbo_.height(), 4, px.data(), outFbo_.width() * 4))
+        if (gfx::savePngRgba8(path, outRt_->width(), outRt_->height(), context().readColorRgba8(outRt_.get())))
             Log::info("saved " + path + " (" + std::to_string(spp_) + " spp)");
         else
             Log::error("could not write " + path);
@@ -384,11 +417,11 @@ private:
 
     // Reads the GPU ray counter every frame (it would overflow 32 bits in a few seconds).
     void benchFrame(int w, int h) {
-        glFinish();
+        context().waitIdle();
         uint32_t rays = 0;
-        glGetNamedBufferSubData(counterBuf_, 0, sizeof(uint32_t), &rays);
+        counterBuf_->read(0, &rays, sizeof(uint32_t));
         uint32_t zero = 0;
-        glNamedBufferSubData(counterBuf_, 0, sizeof(uint32_t), &zero);
+        counterBuf_->write(0, &zero, sizeof(uint32_t));
         totalRays_ += rays;
         if (benchStart_ < 0) return;
         double elapsed = (nowMs() - benchStart_) / 1000.0;
@@ -523,7 +556,7 @@ private:
 
     void statsPanel() {
         ImGui::Begin("Stats");
-        ImGui::Text("Resolution     %d x %d", accum_.width(), accum_.height());
+        ImGui::Text("Resolution     %d x %d", accum_ ? accum_->width() : 0, accum_ ? accum_->height() : 0);
         ImGui::Text("Accumulated    %d spp", spp_);
         ImGui::Text("Throughput     %.1f M samples/s", samplesPerSec_ / 1e6);
         ImGui::Text("Frame          %.2f ms", 1000.0f / std::max(ImGui::GetIO().Framerate, 1e-3f));
@@ -549,7 +582,7 @@ private:
         ImGui::Begin("Viewport");
         ImVec2 sz = ImGui::GetContentRegionAvail();
         vpW_ = (int)sz.x; vpH_ = (int)sz.y;
-        if (outFbo_.colorTexture()) {
+        if (outRt_) {
             // Fixed render size: letterbox it into the panel instead of stretching.
             ImVec2 img = sz;
             if (fixedW_ > 0 && fixedH_ > 0) {
@@ -557,7 +590,7 @@ private:
                 img = {fixedW_ * k, fixedH_ * k};
                 ImGui::SetCursorPos({(sz.x - img.x) * 0.5f, (sz.y - img.y) * 0.5f});
             }
-            ImGui::Image((ImTextureID)(intptr_t)outFbo_.colorTexture(), img, {0, 1}, {1, 0});
+            ImGui::Image((ImTextureID)(intptr_t)outRt_->color().imguiId(), img, {0, 1}, {1, 0});
         }
         viewportHovered_ = ImGui::IsItemHovered();
         ImGuiIO& io = ImGui::GetIO();
@@ -575,10 +608,11 @@ private:
 
     std::string assets_, computePath_, objPath_, meshName_, renderShot_;
     long long computeStamp_ = 0;
-    Shader trace_, display_;
-    Texture2D accum_;
-    Framebuffer outFbo_;
-    GLuint emptyVao_ = 0, nodeBuf_ = 0, triBuf_ = 0, sphereBuf_ = 0, matBuf_ = 0, counterBuf_ = 0;
+    std::unique_ptr<rhi::Pipeline> trace_, display_;
+    std::unique_ptr<rhi::Texture> accum_;                     // rgb = sum of samples, a = count
+    std::unique_ptr<rhi::RenderTarget> outRt_;                // tonemapped RGBA8 shown in the viewport
+    std::vector<std::unique_ptr<rhi::RenderTarget>> retired_; // replaced outputs, freed next frame
+    std::unique_ptr<rhi::Buffer> nodeBuf_, triBuf_, sphereBuf_, matBuf_, counterBuf_;
     OrbitCamera camera_;
     Settings settings_, applied_;
     int strategy_ = -1, meshType_ = -1;

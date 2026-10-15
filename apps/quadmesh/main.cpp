@@ -17,11 +17,9 @@
 #include "geometry/HalfEdgeMesh.h"
 #include "geometry/QuadMesh.h"
 #include "geometry/QuadSimplify.h"
-#include "gfx/Shader.h"
-#include "gfx/Texture.h"
+#include "rhi/Rhi.h"
 #include "scene/Camera.h"
 #include "scene/MeshData.h"
-#include <glad/gl.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -254,21 +252,22 @@ void main() {
 }
 )";
 
+// Interleaved vertex of PolyMeshGpu: position (location 0), normal (1), colour (2), 9 floats.
+static rhi::VertexLayout polyVertexLayout() {
+    rhi::VertexLayout l;
+    l.stride = 9 * sizeof(float);
+    for (uint32_t i = 0; i < 3; ++i) l.attributes.push_back({i, rhi::VertexFormat::Float3, i * 12});
+    return l;
+}
+
 // Flat-shaded polygons (fan-triangulated) plus a line buffer with the polygon edges only,
-// so quads show as quads in the wireframe.
+// so quads show as quads in the wireframe. The buffers are kept and refilled on each upload.
 class PolyMeshGpu {
 public:
-    ~PolyMeshGpu() { destroy(); }
-    void destroy() {
-        GLuint b[2] = {vbo_, lineVbo_}, a[2] = {vao_, lineVao_};
-        glDeleteBuffers(2, b);
-        glDeleteVertexArrays(2, a);
-        vbo_ = lineVbo_ = vao_ = lineVao_ = 0;
-        triVerts_ = lineVerts_ = 0;
-    }
+    void release() { faces_.reset(); lines_.reset(); triVerts_ = lineVerts_ = 0; }
     // colors: per vertex slot (vertexColors) or per face slot (faceColors), one of them non-empty.
-    void upload(const HalfEdgeMesh& m, const std::vector<Vec3>& vertexColors, const std::vector<Vec3>& faceColors) {
-        destroy();
+    void upload(rhi::Device& dev, const HalfEdgeMesh& m, const std::vector<Vec3>& vertexColors,
+                const std::vector<Vec3>& faceColors) {
         std::vector<float> vb, lb;
         std::vector<int> fv;
         for (int f = 0; f < m.faceSlots(); ++f) {
@@ -289,29 +288,33 @@ public:
                 lb.insert(lb.end(), {p.x, p.y, p.z, 0, 0, 0, 0, 0, 0});
             }
         }
-        triVerts_ = (GLsizei)(vb.size() / 9);
-        lineVerts_ = (GLsizei)(lb.size() / 9);
-        makeVao(vao_, vbo_, vb);
-        makeVao(lineVao_, lineVbo_, lb);
+        triVerts_ = (uint32_t)(vb.size() / 9);
+        lineVerts_ = (uint32_t)(lb.size() / 9);
+        fill(dev, faces_, vb, "quadmesh faces");
+        fill(dev, lines_, lb, "quadmesh edges");
     }
-    void drawFaces() const { if (triVerts_) { glBindVertexArray(vao_); glDrawArrays(GL_TRIANGLES, 0, triVerts_); } }
-    void drawLines() const { if (lineVerts_) { glBindVertexArray(lineVao_); glDrawArrays(GL_LINES, 0, lineVerts_); } }
+    // A pipeline created with polyVertexLayout() and the matching topology must be bound.
+    void drawFaces(rhi::CommandContext& ctx) const { if (triVerts_) { ctx.bindVertexBuffer(*faces_); ctx.draw(triVerts_); } }
+    void drawLines(rhi::CommandContext& ctx) const { if (lineVerts_) { ctx.bindVertexBuffer(*lines_); ctx.draw(lineVerts_); } }
 
 private:
-    static void makeVao(GLuint& vao, GLuint& vbo, const std::vector<float>& data) {
+    static void fill(rhi::Device& dev, std::unique_ptr<rhi::Buffer>& buf, const std::vector<float>& data, const char* name) {
         if (data.empty()) return;
-        glCreateBuffers(1, &vbo);
-        glNamedBufferStorage(vbo, data.size() * sizeof(float), data.data(), 0);
-        glCreateVertexArrays(1, &vao);
-        glVertexArrayVertexBuffer(vao, 0, vbo, 0, 9 * sizeof(float));
-        for (int i = 0; i < 3; ++i) {
-            glEnableVertexArrayAttrib(vao, i);
-            glVertexArrayAttribFormat(vao, i, 3, GL_FLOAT, GL_FALSE, i * 12);
-            glVertexArrayAttribBinding(vao, i, 0);
+        size_t bytes = data.size() * sizeof(float);
+        if (!buf) {
+            rhi::BufferDesc d;
+            d.size = bytes;
+            d.usage = rhi::BufferUsage::Vertex | rhi::BufferUsage::CpuWrite;
+            d.initialData = data.data();
+            d.debugName = name;
+            buf = dev.createBuffer(d);
+            return;
         }
+        if (buf->size() != bytes) buf->resizeDiscard(bytes);
+        buf->write(0, data.data(), bytes);
     }
-    GLuint vao_ = 0, vbo_ = 0, lineVao_ = 0, lineVbo_ = 0;
-    GLsizei triVerts_ = 0, lineVerts_ = 0;
+    std::unique_ptr<rhi::Buffer> faces_, lines_;
+    uint32_t triVerts_ = 0, lineVerts_ = 0;
 };
 
 // Blue -> cyan -> green -> yellow -> red, t in [0, 1].
@@ -334,7 +337,22 @@ public:
 
 protected:
     bool onInit(int argc, char** argv) override {
-        if (!shader_.compileGraphics(kVert, kFrag)) { Log::error("shader: " + shader_.error()); return false; }
+        // Same shaders twice: filled faces pushed back by a polygon offset, and the edges as lines on top.
+        rhi::GraphicsPipelineDesc pd;
+        pd.vertexSource = kVert;
+        pd.fragmentSource = kFrag;
+        pd.vertexLayout = polyVertexLayout();
+        pd.polygonOffset = true;
+        pd.polygonOffsetFactor = pd.polygonOffsetUnits = 1.0f;
+        pd.debugName = "quadmesh faces";
+        std::string err;
+        faces_ = device().createGraphicsPipeline(pd, &err);
+        if (!faces_) { Log::error("shader: " + err); return false; }
+        pd.topology = rhi::Topology::Lines;
+        pd.polygonOffset = false;
+        pd.debugName = "quadmesh wireframe";
+        lines_ = device().createGraphicsPipeline(pd, &err);
+        if (!lines_) { Log::error("shader: " + err); return false; }
         std::string model = "teapot";
         std::vector<Method> runs;
         for (int i = 1; i < argc; ++i) {
@@ -367,8 +385,20 @@ protected:
     }
 
     void onShutdown() override {
-        shader_.destroy(); fbo_.destroy();
-        gpuMain_.destroy(); gpuSide_.destroy();
+        // GPU objects must die while the device is still alive.
+        faces_.reset(); lines_.reset(); viewRt_.reset();
+        gpuMain_.release(); gpuSide_.release();
+    }
+
+    void onUpdate(float) override {
+        // The render target follows the viewport panel size of the previous frame. It is recreated
+        // here, before this frame's GUI refers to its texture, never between onGui and the draw.
+        int w = std::max(vpW_, 16), h = std::max(vpH_, 16);
+        if (!viewRt_ || viewRt_->width() != w || viewRt_->height() != h) {
+            rhi::RenderTargetDesc d;
+            d.width = w; d.height = h; d.colorFormat = rhi::Format::RGBA8; d.depth = true; d.debugName = "quadmesh view";
+            viewRt_ = device().createRenderTarget(d);
+        }
     }
 
     void onScroll(double, double dy) override { if (viewportHovered_) camera_.zoom((float)dy); }
@@ -385,36 +415,37 @@ protected:
     }
 
     void onRender() override {
-        int w = std::max(vpW_, 16), h = std::max(vpH_, 16);
-        fbo_.resize(w, h, GL_RGBA8);
-        fbo_.bind();
-        glEnable(GL_DEPTH_TEST);
-        glClearColor(0.075f, 0.08f, 0.10f, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        int w = viewRt_->width(), h = viewRt_->height();
+        rhi::CommandContext& ctx = context();
+        rhi::RenderPassDesc pass;
+        pass.clearColorValue[0] = 0.075f; pass.clearColorValue[1] = 0.08f; pass.clearColorValue[2] = 0.10f;
+        ctx.beginRenderPass(viewRt_.get(), pass);
         Mat4 vp = camera_.projection((float)w / h) * camera_.view();
-        shader_.bind();
-        shader_.set("uViewProj", vp);
-        shader_.set("uCameraPos", camera_.position());
+        Vec3 cam = camera_.position();
+        faces_->set("uViewProj", vp);
+        faces_->set("uCameraPos", cam);
+        faces_->set("uLit", 1);
+        lines_->set("uViewProj", vp);
+        lines_->set("uCameraPos", cam);
+        lines_->set("uLit", 0);
+        lines_->set("uLineColor", 0.06f, 0.06f, 0.08f);
         const Result* side = leftResult();
         // Side by side along the screen's horizontal, whatever the orbit angle.
-        Vec3 right = normalize(cross(camera_.target - camera_.position(), {0, 1, 0}));
+        Vec3 right = normalize(cross(camera_.target - cam, {0, 1, 0}));
         auto drawOne = [&](const PolyMeshGpu& g, float dx) {
             Mat4 model = translate(right * dx);
-            shader_.set("uModel", model);
-            shader_.set("uLit", 1);
-            glEnable(GL_POLYGON_OFFSET_FILL);
-            glPolygonOffset(1.0f, 1.0f);
-            g.drawFaces();
-            glDisable(GL_POLYGON_OFFSET_FILL);
+            ctx.bindPipeline(*faces_);
+            faces_->set("uModel", model);
+            g.drawFaces(ctx);
             if (wire_) {
-                shader_.set("uLit", 0);
-                shader_.set("uLineColor", 0.06f, 0.06f, 0.08f);
-                g.drawLines();
+                ctx.bindPipeline(*lines_);
+                lines_->set("uModel", model);
+                g.drawLines(ctx);
             }
         };
         if (shownResult()) drawOne(gpuMain_, side ? 1.3f : 0.0f);
         if (side) drawOne(gpuSide_, -1.3f);
-        Framebuffer::unbind();
+        ctx.endRenderPass();
     }
 
 private:
@@ -498,8 +529,8 @@ private:
 
     void refreshGpu() {
         std::vector<Vec3> fc;
-        if (const Result* r = shownResult()) { auto vc = colorsFor(*r, fc); gpuMain_.upload(r->mesh, vc, fc); }
-        if (const Result* r = leftResult()) { auto vc = colorsFor(*r, fc); gpuSide_.upload(r->mesh, vc, fc); }
+        if (const Result* r = shownResult()) { auto vc = colorsFor(*r, fc); gpuMain_.upload(device(), r->mesh, vc, fc); }
+        if (const Result* r = leftResult()) { auto vc = colorsFor(*r, fc); gpuSide_.upload(device(), r->mesh, vc, fc); }
     }
 
     // ---- UI ----
@@ -618,7 +649,7 @@ private:
         ImVec2 sz = ImGui::GetContentRegionAvail();
         vpW_ = (int)sz.x; vpH_ = (int)sz.y;
         ImVec2 origin = ImGui::GetCursorScreenPos();
-        if (fbo_.colorTexture()) ImGui::Image((ImTextureID)(intptr_t)fbo_.colorTexture(), sz, {0, 1}, {1, 0});
+        if (viewRt_) ImGui::Image((ImTextureID)(intptr_t)viewRt_->color().imguiId(), sz, {0, 1}, {1, 0});
         viewportHovered_ = ImGui::IsItemHovered();
         if (viewportHovered_ && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
             camera_.rotate(ImGui::GetIO().MouseDelta.x, ImGui::GetIO().MouseDelta.y);
@@ -636,8 +667,8 @@ private:
         ImGui::PopStyleVar();
     }
 
-    Shader shader_;
-    Framebuffer fbo_;
+    std::unique_ptr<rhi::Pipeline> faces_, lines_;
+    std::unique_ptr<rhi::RenderTarget> viewRt_;
     PolyMeshGpu gpuMain_, gpuSide_;
     OrbitCamera camera_{{0, 0, 0}, 0.6f, 0.45f, 3.6f};
     std::unique_ptr<Model> model_;
