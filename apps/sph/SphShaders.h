@@ -22,7 +22,7 @@ uniform float uInvCell, uH, uH2, uMass, uRho0, uTaitB, uDt, uMu, uXsph, uRest, u
 uniform float uPoly6C, uSpikyGradC, uViscLapC;
 uniform vec3 uGravity, uBox;
 
-// Same hash as prism::HashGrid::hashCell (uint wrap-around arithmetic).
+// Same hash as glue::HashGrid::hashCell (uint wrap-around arithmetic).
 uint hashCell(ivec3 c) { return ((uint(c.x) * 73856093u) ^ (uint(c.y) * 19349663u) ^ (uint(c.z) * 83492791u)) & uMask; }
 ivec3 cellOf(vec3 p) { return ivec3(floor(p * uInvCell)); }
 

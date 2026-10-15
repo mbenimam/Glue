@@ -1,9 +1,9 @@
--- Prismatic build script. Generate project files with:  premake5 gmake   (or vs2022, xcode4)
+-- Glue build script. Generate project files with:  premake5 gmake   (or vs2022, xcode4)
 -- Then:  make -C build config=release -j
-workspace "Prismatic"
+workspace "Glue"
     architecture "x86_64"
     configurations { "Debug", "Release" }
-    startproject "shaderlab"
+    startproject "gluelab"
     location "build"
     language "C++"
     cppdialect "C++20"
@@ -11,9 +11,11 @@ workspace "Prismatic"
     targetdir "bin/%{cfg.buildcfg}"
     objdir "build/obj/%{cfg.buildcfg}/%{prj.name}"
     warnings "Extra"
+    -- Third-party headers are not ours to fix: keep their warnings out of the build log.
+    externalincludedirs { "third_party/stb", "third_party/imgui", "third_party/glfw/include", "third_party/glad/include" }
 
     filter "configurations:Debug"
-        defines { "PRISM_DEBUG" }
+        defines { "GLUE_DEBUG" }
         symbols "On"
     filter "configurations:Release"
         optimize "Speed"
@@ -34,7 +36,7 @@ local wlProtocols = { "wayland", "viewporter", "xdg-shell", "idle-inhibit-unstab
                       "pointer-constraints-unstable-v1", "relative-pointer-unstable-v1",
                       "fractional-scale-v1", "xdg-activation-v1", "xdg-decoration-unstable-v1" }
 local wlEnabled = false
-if os.target() == "linux" and os.getenv("PRISM_NO_WAYLAND") == nil then
+if os.target() == "linux" and os.getenv("GLUE_NO_WAYLAND") == nil then
     os.mkdir(wlGen)
     wlEnabled = true
     for _, name in ipairs(wlProtocols) do
@@ -94,7 +96,7 @@ project "imgui"
     }
     includedirs { "third_party/imgui", "third_party/glfw/include" }
 
-project "prism"
+project "glue"
     kind "StaticLib"
     files { "engine/src/**.h", "engine/src/**.cpp" }
     includedirs { "engine/src", "third_party/glad/include", "third_party/glfw/include",
@@ -107,7 +109,7 @@ local function app(name, dir)
         files { dir .. "/**.cpp", dir .. "/**.h" }
         includedirs { "engine/src", "third_party/glad/include", "third_party/glfw/include",
                       "third_party/imgui", "third_party/stb" }
-        links { "prism", "imgui", "glfw", "glad" }
+        links { "glue", "imgui", "glfw", "glad" }
         filter "system:linux"
             links { "dl", "pthread", "X11" }
         filter "system:windows"
@@ -131,7 +133,7 @@ project "tests"
     kind "ConsoleApp"
     files { "tests/**.cpp" }
     includedirs { "engine/src", "third_party/stb" }
-    links { "prism", "imgui", "glfw", "glad" }
+    links { "glue", "imgui", "glfw", "glad" }
     filter "system:linux"
         links { "dl", "pthread", "X11" }
     filter {}

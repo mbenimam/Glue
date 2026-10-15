@@ -31,7 +31,7 @@
 #include <cstring>
 #include <memory>
 
-using namespace prism;
+using namespace glue;
 using Clock = std::chrono::steady_clock;
 
 static double msSince(Clock::time_point t0) {
@@ -330,7 +330,7 @@ enum class View { Shaded, Curvature, Fitmap, Error };
 
 class QuadMeshApp : public Application {
 public:
-    QuadMeshApp() : Application(AppConfig{"Prismatic QuadMesh", 1600, 900, true, false}) {}
+    QuadMeshApp() : Application(AppConfig{"Glue QuadMesh", 1600, 900, true, false}) {}
 
 protected:
     bool onInit(int argc, char** argv) override {

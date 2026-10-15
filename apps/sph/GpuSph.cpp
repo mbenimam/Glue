@@ -3,7 +3,7 @@
 
 namespace sph {
 
-using prism::Shader;
+using glue::Shader;
 
 bool GpuSph::init(std::string& err) {
     struct Pass { Shader* s; const char* src; const char* name; };
@@ -46,7 +46,7 @@ void GpuSph::upload(const SphSolver& s) {
         x4[4 * i] = x.x; x4[4 * i + 1] = x.y; x4[4 * i + 2] = x.z; x4[4 * i + 3] = 1.0f;
         v4[4 * i] = v.x; v4[4 * i + 1] = v.y; v4[4 * i + 2] = v.z; v4[4 * i + 3] = 0.0f;
     }
-    table_ = prism::HashGrid::tableSizeFor(n_);
+    table_ = glue::HashGrid::tableSizeFor(n_);
     pos_[0] = makeBuffer(n_ * 16, x4.data());
     pos_[1] = makeBuffer(n_ * 16, x4.data());
     vel_ = makeBuffer(n_ * 16, v4.data());
@@ -68,7 +68,7 @@ void GpuSph::bindAll() const {
 }
 
 void GpuSph::setUniforms(Shader& s, const Params& p) const {
-    prism::SphKernels k(h_);
+    glue::SphKernels k(h_);
     // Uniforms a pass does not use have location -1, which GL silently ignores.
     glProgramUniform1ui(s.id(), s.loc("uN"), (GLuint)n_);
     glProgramUniform1ui(s.id(), s.loc("uMask"), table_ - 1);

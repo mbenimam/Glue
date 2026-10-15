@@ -5,7 +5,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
-namespace prism {
+namespace glue {
 
 void Texture2D::create(int w, int h, GLenum fmt, GLenum filter, GLenum wrap) {
     destroy();
@@ -70,4 +70,4 @@ std::vector<unsigned char> Framebuffer::readback() const {
     return px;
 }
 
-} // namespace prism
+} // namespace glue

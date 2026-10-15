@@ -14,7 +14,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace prism {
+namespace glue {
 
 class HashGrid {
 public:
@@ -63,4 +63,4 @@ private:
     std::vector<Vec3> sortedPoints_;   // points in bucket order
 };
 
-} // namespace prism
+} // namespace glue

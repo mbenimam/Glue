@@ -10,7 +10,7 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(rgba32f, binding = 0) uniform image2D uAccum;
 
-struct Node { vec3 lo; uint leftOrFirst; vec3 hi; uint count; };          // matches prism::BvhNode
+struct Node { vec3 lo; uint leftOrFirst; vec3 hi; uint count; };          // matches glue::BvhNode
 struct Tri { vec4 v0; vec4 e1; vec4 e2; vec4 n0; vec4 n1; vec4 n2; };      // e1 = v1 - v0, e2 = v2 - v0
 struct Sphere { vec4 centerRadius; uint mat; uint pad0, pad1, pad2; };
 // albedo.w = type (0 diffuse, 1 metal, 2 glass), emission.w = roughness,

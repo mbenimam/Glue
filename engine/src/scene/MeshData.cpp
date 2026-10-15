@@ -7,7 +7,7 @@
 #include <tuple>
 #include <unordered_map>
 
-namespace prism {
+namespace glue {
 
 void MeshData::computeNormals() {
     normals.assign(positions.size(), Vec3{});
@@ -269,4 +269,4 @@ bool loadObj(const std::string& path, MeshData& out, std::string* err) {
     return parseObj(text, out, err);
 }
 
-} // namespace prism
+} // namespace glue

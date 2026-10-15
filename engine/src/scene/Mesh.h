@@ -2,7 +2,7 @@
 #include <glad/gl.h>
 #include "scene/MeshData.h"
 
-namespace prism {
+namespace glue {
 
 // GPU copy of a MeshData: interleaved position, normal, uv in one buffer.
 class Mesh {
@@ -22,4 +22,4 @@ private:
     GLsizei indexCount_ = 0;
 };
 
-} // namespace prism
+} // namespace glue

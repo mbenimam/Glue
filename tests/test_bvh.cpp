@@ -5,7 +5,7 @@
 
 #include "TestFramework.h"
 
-using namespace prism;
+using namespace glue;
 
 namespace {
 struct Rng {   // small deterministic LCG so failures reproduce

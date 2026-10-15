@@ -4,7 +4,7 @@
 #include <unordered_map>
 #include "math/Math.h"
 
-namespace prism {
+namespace glue {
 
 // A linked GLSL program. Compile errors are kept as text so the editor can show them
 // instead of crashing; a failed compile leaves the previous program untouched.
@@ -43,4 +43,4 @@ private:
     mutable std::unordered_map<std::string, GLint> locs_;
 };
 
-} // namespace prism
+} // namespace glue

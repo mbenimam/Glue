@@ -8,7 +8,7 @@
 
 #include "TestFramework.h"
 
-using namespace prism;
+using namespace glue;
 
 TEST(core_testMath) {
     Mat4 I;

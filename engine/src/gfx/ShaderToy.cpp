@@ -4,7 +4,7 @@
 #include <sstream>
 #include <cctype>
 
-namespace prism {
+namespace glue {
 
 const char* kShadertoyVertex = R"(#version 450 core
 out vec2 vUv;
@@ -84,4 +84,4 @@ std::vector<UniformParam> parseUniformParams(const std::string& src) {
     return out;
 }
 
-} // namespace prism
+} // namespace glue

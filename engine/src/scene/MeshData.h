@@ -4,7 +4,7 @@
 #include <vector>
 #include "math/Math.h"
 
-namespace prism {
+namespace glue {
 
 // CPU-side triangle mesh. Everything geometry-related (teapot, OBJ, later the
 // half-edge structure) starts from this plain indexed representation.
@@ -37,4 +37,4 @@ bool parseObj(const std::string& text, MeshData& out, std::string* err = nullptr
 // Merge vertices whose positions coincide within `eps`. Returns the number removed.
 size_t weldVertices(MeshData& m, float eps = 1e-4f);
 
-} // namespace prism
+} // namespace glue

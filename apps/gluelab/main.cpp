@@ -1,4 +1,4 @@
-// ShaderLab: write a Shadertoy-style fragment shader and watch it run on a 3D scene.
+// GlueLab: write a Shadertoy-style fragment shader and watch it run on a 3D scene.
 //
 // Pipeline each frame:
 //   scene (teapot / OBJ) --> offscreen color+depth --> your effect shader --> viewport panel
@@ -21,12 +21,12 @@
 #include <cstring>
 #include <map>
 
-using namespace prism;
+using namespace glue;
 namespace fs = std::filesystem;
 
-class ShaderLab : public Application {
+class GlueLab : public Application {
 public:
-    ShaderLab() : Application(AppConfig{"Prismatic ShaderLab", 1600, 900, true, false}) {}
+    GlueLab() : Application(AppConfig{"GlueLab", 1600, 900, true, false}) {}
 
 protected:
     bool onInit(int argc, char** argv) override {
@@ -34,7 +34,7 @@ protected:
         std::string vs, fs_, gfs;
         if (!readFile(assets_ + "/shaders/scene.vert", vs) || !readFile(assets_ + "/shaders/scene.frag", fs_) ||
             !readFile(assets_ + "/shaders/grid.frag", gfs)) {
-            Log::error("assets/shaders not found (set PRISM_ASSETS)");
+            Log::error("assets/shaders not found (set GLUE_ASSETS)");
             return false;
         }
         if (!scene_.compileGraphics(vs, fs_) || !grid_.compileGraphics(vs, gfs)) {
@@ -163,7 +163,7 @@ protected:
 
 private:
     // ---- UI ----
-    // First run (no prismatic.ini yet): left = effects + parameters, centre = viewport,
+    // First run (no gluelab.ini yet): left = effects + parameters, centre = viewport,
     // right = shader editor + console.
     void buildDefaultLayout(ImGuiID root) {
         if (ImGui::DockBuilderGetNode(root) && ImGui::DockBuilderGetNode(root)->IsSplitNode()) return;  // restored from ini
@@ -388,6 +388,6 @@ private:
 };
 
 int main(int argc, char** argv) {
-    ShaderLab app;
+    GlueLab app;
     return app.run(argc, argv);
 }

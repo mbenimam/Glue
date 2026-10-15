@@ -3,7 +3,7 @@
 
 #include "TestFramework.h"
 
-using namespace prism;
+using namespace glue;
 
 // Integral of a radial function over the ball of radius h: int_0^h 4 pi r^2 f(r) dr.
 // Composite Simpson on many intervals; the integrands are smooth on (0, h].

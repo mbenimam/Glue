@@ -1,7 +1,7 @@
 #pragma once
 #include "math/Math.h"
 
-namespace prism {
+namespace glue {
 
 // Orbit camera: yaw/pitch around a target at a given distance.
 struct OrbitCamera {
@@ -22,4 +22,4 @@ struct OrbitCamera {
     void zoom(float scroll) { distance = std::clamp(distance * std::pow(0.9f, scroll), 0.3f, 100.0f); }
 };
 
-} // namespace prism
+} // namespace glue

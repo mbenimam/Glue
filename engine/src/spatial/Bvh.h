@@ -6,7 +6,7 @@
 #include "math/Math.h"
 #include "scene/MeshData.h"
 
-namespace prism {
+namespace glue {
 
 struct Aabb {
     Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
@@ -85,4 +85,4 @@ private:
     Options opt_;
 };
 
-} // namespace prism
+} // namespace glue

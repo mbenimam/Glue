@@ -10,7 +10,7 @@
 #include <cstdlib>
 #include <vector>
 
-namespace prism {
+namespace glue {
 
 void scrollThunk(GLFWwindow* w, double dx, double dy) {
     ImGui_ImplGlfw_ScrollCallback(w, dx, dy);
@@ -76,7 +76,7 @@ int Application::run(int argc, char** argv) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
-    io.IniFilename = "prismatic.ini";
+    io.IniFilename = "gluelab.ini";
     ImGui::StyleColorsDark();
     ImGuiStyle& st = ImGui::GetStyle();
     st.WindowRounding = 4; st.FrameRounding = 3; st.TabRounding = 3; st.FramePadding = {8, 4};
@@ -126,4 +126,4 @@ int Application::run(int argc, char** argv) {
     return rc;
 }
 
-} // namespace prism
+} // namespace glue

@@ -3,7 +3,7 @@
 #include <cmath>
 #include <algorithm>
 
-namespace prism {
+namespace glue {
 
 constexpr float kPi = 3.14159265358979323846f;
 inline float radians(float d) { return d * kPi / 180.0f; }
@@ -82,4 +82,4 @@ inline Mat4 lookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
     return r;
 }
 
-} // namespace prism
+} // namespace glue

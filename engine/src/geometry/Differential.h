@@ -8,7 +8,7 @@
 #include <vector>
 #include "geometry/HalfEdgeMesh.h"
 
-namespace prism {
+namespace glue {
 
 std::vector<Vec3> faceNormals(const HalfEdgeMesh& m);       // unit Newell normals
 std::vector<float> faceAreas(const HalfEdgeMesh& m);
@@ -42,4 +42,4 @@ Curvature computeCurvature(const HalfEdgeMesh& m);
 void smoothUniform(HalfEdgeMesh& m, int iterations, float lambda = 0.5f);
 void smoothCotan(HalfEdgeMesh& m, int iterations, float lambda = 0.5f);
 
-} // namespace prism
+} // namespace glue

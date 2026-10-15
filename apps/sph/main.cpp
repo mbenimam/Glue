@@ -26,7 +26,7 @@
 #include <cstring>
 #include <string>
 
-using namespace prism;
+using namespace glue;
 using namespace sph;
 
 namespace {
@@ -76,11 +76,11 @@ Summary summarize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const 
 
 class SphApp : public Application {
 public:
-    SphApp() : Application(AppConfig{"Prismatic SPH", 1600, 900, true, false}) {}
+    SphApp() : Application(AppConfig{"Glue SPH", 1600, 900, true, false}) {}
 
 protected:
     bool onInit(int argc, char** argv) override {
-        ImGui::GetIO().IniFilename = "prismatic_sph.ini";   // own layout file, not ShaderLab's
+        ImGui::GetIO().IniFilename = "glue_sph.ini";   // own layout file, not GlueLab's
         if (!particles_.compileGraphics(kParticleVs, kParticleFs) || !box_.compileGraphics(kBoxVs, kBoxFs)) {
             Log::error("render shaders: " + particles_.error() + box_.error());
             return false;

@@ -6,7 +6,7 @@
 
 namespace sph {
 
-using prism::kPi;
+using glue::kPi;
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -32,7 +32,7 @@ void SphSolver::addBlock(Vec3 lo, Vec3 hi, std::vector<Vec3>& out) const {
 void SphSolver::addSphere(Vec3 c, float r, std::vector<Vec3>& out) const {
     std::vector<Vec3> cube;
     addBlock(c - Vec3{r, r, r}, c + Vec3{r, r, r}, cube);
-    for (const Vec3& q : cube) if (prism::length(q - c) <= r) out.push_back(q);
+    for (const Vec3& q : cube) if (glue::length(q - c) <= r) out.push_back(q);
 }
 
 void SphSolver::reset(const Params& p) {
@@ -79,11 +79,11 @@ void SphSolver::refreshDerived() {
         for (int j = -K; j <= K; ++j)
             for (int i = -K; i <= K; ++i) {
                 Vec3 r{i * d_, j * d_, k * d_};
-                float rl = prism::length(r);
+                float rl = glue::length(r);
                 sumW += k_.poly6(rl * rl);
                 Vec3 g = k_.spikyGradient(r, rl);
                 sumG += g;
-                sumGG += prism::dot(g, g);
+                sumGG += glue::dot(g, g);
             }
     m_ = p_.restDensity / sumW;
     // Tait: p = B ((rho/rho0)^7 - 1), with B = rho0 c0^2 / 7 so that dp/drho = c0^2 at rest.
@@ -91,14 +91,14 @@ void SphSolver::refreshDerived() {
     // PCISPH: a density error e is removed in one step by the pressure delta * e, where
     // delta = 1 / (beta (sum grad W . sum grad W + sum grad W . grad W)), beta = 2 (dt m / rho0)^2.
     float beta = 2.0f * (p_.dt * m_ / p_.restDensity) * (p_.dt * m_ / p_.restDensity);
-    pciDelta_ = 1.0f / (beta * (prism::dot(sumG, sumG) + sumGG));
+    pciDelta_ = 1.0f / (beta * (glue::dot(sumG, sumG) + sumGG));
 }
 
 float SphSolver::suggestedDt() const {
     // CFL: nothing should travel more than 0.4 h per step. WCSPH must resolve sound (c0);
     // PCISPH only the flow, bounded by free fall over the container height.
     float vmax = p_.solver == Solver::WCSPH ? p_.soundSpeed
-                                            : std::sqrt(2.0f * prism::length(p_.gravity) * p_.box.y) + 1e-3f;
+                                            : std::sqrt(2.0f * glue::length(p_.gravity) * p_.box.y) + 1e-3f;
     return std::min(0.4f * k_.h / vmax, 0.005f);
 }
 
@@ -143,7 +143,7 @@ void SphSolver::computeDensity(const std::vector<Vec3>& pos, std::vector<float>&
         float s = 0;
         for (uint32_t k = nStart_[i]; k < nStart_[i + 1]; ++k) {
             Vec3 r = pos[i] - pos[nbr_[k]];
-            s += k_.poly6(prism::dot(r, r));
+            s += k_.poly6(glue::dot(r, r));
         }
         out[i] = m_ * s;
     }
@@ -160,7 +160,7 @@ void SphSolver::nonPressureAccel() {
             for (uint32_t k = nStart_[i]; k < nStart_[i + 1]; ++k) {
                 uint32_t j = nbr_[k];
                 if (j == (uint32_t)i) continue;
-                float r = prism::length(x_[i] - x_[j]);
+                float r = glue::length(x_[i] - x_[j]);
                 a += (v_[j] - v_[i]) * (m_ / rho_[j] * k_.viscosityLaplacian(r));
             }
             a = a * (mu / rho_[i]);
@@ -198,7 +198,7 @@ void SphSolver::finishStep(std::vector<Vec3>& vStar) {
             for (uint32_t k = nStart_[i]; k < nStart_[i + 1]; ++k) {
                 uint32_t j = nbr_[k];
                 Vec3 r = x_[i] - x_[j];
-                dv += (vStar[j] - vStar[i]) * (2.0f * m_ / (rho_[i] + rho_[j]) * k_.poly6(prism::dot(r, r)));
+                dv += (vStar[j] - vStar[i]) * (2.0f * m_ / (rho_[i] + rho_[j]) * k_.poly6(glue::dot(r, r)));
             }
         v_[i] = vStar[i] + dv * eps;
     }
@@ -208,7 +208,7 @@ void SphSolver::finishStep(std::vector<Vec3>& vStar) {
     for (int i = 0; i < n; ++i) {
         x_[i] += v_[i] * dt;
         clampToBox(x_[i], &v_[i]);
-        maxV2 = std::max(maxV2, prism::dot(v_[i], v_[i]));
+        maxV2 = std::max(maxV2, glue::dot(v_[i], v_[i]));
         float e = std::max(rho_[i] / p_.restDensity - 1.0f, 0.0f);
         errSum += e;
         errMax = std::max(errMax, e);
@@ -248,7 +248,7 @@ void SphSolver::stepWcsph() {
             uint32_t j = nbr_[k];
             if (j == (uint32_t)i) continue;
             Vec3 r = x_[i] - x_[j];
-            float rl = prism::length(r);
+            float rl = glue::length(r);
             a -= k_.spikyGradient(r, rl) * (m_ * (pi + press_[j] / (rho_[j] * rho_[j])));
         }
         aP_[i] = a;
@@ -287,7 +287,7 @@ void SphSolver::stepPcisph() {
             float s = 0;
             for (uint32_t k = nStart_[i]; k < nStart_[i + 1]; ++k) {
                 Vec3 r = xPred_[i] - xPred_[nbr_[k]];
-                s += k_.poly6(prism::dot(r, r));
+                s += k_.poly6(glue::dot(r, r));
             }
             float err = m_ * s - rho0;
             rhoPred_[i] = m_ * s;
@@ -306,7 +306,7 @@ void SphSolver::stepPcisph() {
                 uint32_t j = nbr_[k];
                 if (j == (uint32_t)i) continue;
                 Vec3 r = x_[i] - x_[j];
-                a -= k_.spikyGradient(r, prism::length(r)) * (m_ * (press_[i] + press_[j]) * invRho02);
+                a -= k_.spikyGradient(r, glue::length(r)) * (m_ * (press_[i] + press_[j]) * invRho02);
             }
             aP_[i] = a;
         }

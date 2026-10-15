@@ -12,7 +12,7 @@
 // r_ij = x_i - x_j, so grad W points from j to i scaled by dW/dr (negative: W falls with distance).
 #include "math/Math.h"
 
-namespace prism {
+namespace glue {
 
 struct SphKernels {
     float h = 1, h2 = 1;
@@ -64,4 +64,4 @@ struct SphKernels {
     }
 };
 
-} // namespace prism
+} // namespace glue

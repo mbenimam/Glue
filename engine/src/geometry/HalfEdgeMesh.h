@@ -21,7 +21,7 @@
 #include <vector>
 #include "math/Math.h"
 
-namespace prism {
+namespace glue {
 
 struct MeshData;
 
@@ -177,4 +177,4 @@ private:
 // Returns the number of holes filled.
 size_t fillHoles(HalfEdgeMesh& m);
 
-} // namespace prism
+} // namespace glue

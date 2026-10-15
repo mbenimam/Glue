@@ -3,10 +3,10 @@
 
 struct GLFWwindow;
 
-namespace prism {
+namespace glue {
 
 struct AppConfig {
-    std::string title = "Prismatic";
+    std::string title = "Glue";
     int width = 1600, height = 900;
     bool vsync = true;
     bool hidden = false;           // render without showing the window (screenshots, CI)
@@ -48,4 +48,4 @@ private:
     unsigned long long frame_ = 0;
 };
 
-} // namespace prism
+} // namespace glue

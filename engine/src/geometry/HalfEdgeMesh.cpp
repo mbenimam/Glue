@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace prism {
+namespace glue {
 
 // ---------------------------------------------------------------- allocation
 
@@ -808,4 +808,4 @@ size_t fillHoles(HalfEdgeMesh& m) {
     return loops.size();
 }
 
-} // namespace prism
+} // namespace glue

@@ -1,5 +1,5 @@
 // Uses the scene's depth buffer (iChannel2): distant geometry fades into coloured fog.
-// Depth is non-linear, so we first recover the eye-space distance (near 0.05, far 200 as in ShaderLab).
+// Depth is non-linear, so we first recover the eye-space distance (near 0.05, far 200 as in GlueLab).
 uniform float uDensity = 2.0;    // @range 0 8
 uniform vec3  uFog = vec3(0.1, 0.15, 0.3); // @color
 

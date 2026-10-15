@@ -23,7 +23,7 @@
 #include "geometry/HalfEdgeMesh.h"
 #include "geometry/SpatialGrid.h"
 
-namespace prism {
+namespace glue {
 
 // The original surface, used for projection and for measuring errors.
 class ReferenceSurface {
@@ -105,4 +105,4 @@ std::vector<float> faceErrors(const HalfEdgeMesh& m, const ReferenceSurface& ref
 // with mu = sqrt(area / quads).
 double homeometryEnergy(const HalfEdgeMesh& m);
 
-} // namespace prism
+} // namespace glue

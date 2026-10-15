@@ -10,7 +10,7 @@
 #include <vector>
 #include "math/Math.h"
 
-namespace prism {
+namespace glue {
 
 // Closest point of triangle (a, b, c) to p, with barycentric weights (Ericson, Real-Time
 // Collision Detection, 5.1.5).
@@ -45,4 +45,4 @@ private:
     mutable uint32_t query_ = 0;
 };
 
-} // namespace prism
+} // namespace glue

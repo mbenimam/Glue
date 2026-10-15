@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <numeric>
 
-namespace prism {
+namespace glue {
 
 bool intersectTriangle(const Vec3& org, const Vec3& dir, const Triangle& tri, float tmin, RayHit& hit, uint32_t id) {
     // Solve org + t*dir = v0 + u*e1 + v*e2 with Cramer's rule, sharing the cross products.
@@ -208,4 +208,4 @@ int Bvh::depth() const {
     return best;
 }
 
-} // namespace prism
+} // namespace glue

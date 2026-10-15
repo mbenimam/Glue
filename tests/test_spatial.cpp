@@ -5,7 +5,7 @@
 
 #include "TestFramework.h"
 
-using namespace prism;
+using namespace glue;
 
 static std::vector<uint32_t> bruteForce(const std::vector<Vec3>& p, const Vec3& x, float r) {
     std::vector<uint32_t> out;

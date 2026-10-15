@@ -4,7 +4,7 @@
 #include <sstream>
 #include <filesystem>
 
-namespace prism {
+namespace glue {
 inline bool readFile(const std::string& path, std::string& out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
@@ -21,4 +21,4 @@ inline long long fileStamp(const std::string& path) {
     auto t = std::filesystem::last_write_time(path, ec);
     return ec ? 0 : (long long)t.time_since_epoch().count();
 }
-} // namespace prism
+} // namespace glue

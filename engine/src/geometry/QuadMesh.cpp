@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <chrono>
 
-namespace prism {
+namespace glue {
 
 float quadSquareness(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d) {
     Vec3 p[4] = {a, b, c, d};
@@ -184,4 +184,4 @@ QuadQualityStats measureQuads(const HalfEdgeMesh& m) {
     return s;
 }
 
-} // namespace prism
+} // namespace glue

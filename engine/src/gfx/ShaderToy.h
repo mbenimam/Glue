@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 
-namespace prism {
+namespace glue {
 
 // A user-declared uniform that the editor turns into a widget:
 //   uniform float uAmount = 0.5; // @range 0 1
@@ -24,4 +24,4 @@ std::string wrapShadertoy(const std::string& userSource);
 // Number of lines the prelude adds before `#line 1` (for tests and tooling).
 extern const char* kShadertoyVertex;
 
-} // namespace prism
+} // namespace glue

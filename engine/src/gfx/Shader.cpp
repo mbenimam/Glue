@@ -1,7 +1,7 @@
 #include "gfx/Shader.h"
 #include <vector>
 
-namespace prism {
+namespace glue {
 
 GLuint Shader::compileStage(GLenum type, const std::string& src, std::string& err) {
     GLuint s = glCreateShader(type);
@@ -71,4 +71,4 @@ GLint Shader::loc(const char* name) const {
     return l;
 }
 
-} // namespace prism
+} // namespace glue

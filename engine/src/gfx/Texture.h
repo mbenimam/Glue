@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace prism {
+namespace glue {
 
 class Texture2D {
 public:
@@ -48,4 +48,4 @@ private:
     GLenum fmt_ = 0;
 };
 
-} // namespace prism
+} // namespace glue

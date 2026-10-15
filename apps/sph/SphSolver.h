@@ -16,7 +16,7 @@
 
 namespace sph {
 
-using prism::Vec3;
+using glue::Vec3;
 
 enum class Solver { WCSPH, PCISPH };
 enum class Scene { DamBreak, Drop, DoubleDamBreak };
@@ -86,8 +86,8 @@ private:
     void addSphere(Vec3 c, float r, std::vector<Vec3>& out) const;
 
     Params p_;
-    prism::SphKernels k_;
-    prism::HashGrid grid_;
+    glue::SphKernels k_;
+    glue::HashGrid grid_;
     float d_ = 0.02f, m_ = 0.008f, taitB_ = 0, pciDelta_ = 0;
     double t_ = 0;
     long long steps_ = 0;

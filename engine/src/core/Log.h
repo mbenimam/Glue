@@ -4,7 +4,7 @@
 #include <vector>
 #include <mutex>
 
-namespace prism {
+namespace glue {
 // Ring of recent messages so the editor console can show what the engine said.
 class Log {
 public:
@@ -26,4 +26,4 @@ private:
     static std::vector<std::string>& lines() { static std::vector<std::string> v; return v; }
     static std::mutex& mutex() { static std::mutex m; return m; }
 };
-} // namespace prism
+} // namespace glue

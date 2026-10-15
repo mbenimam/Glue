@@ -1,6 +1,6 @@
 #include "geometry/Differential.h"
 
-namespace prism {
+namespace glue {
 
 static float cotAngle(const Vec3& a, const Vec3& b) {      // cot of the angle between a and b
     float s = length(cross(a, b));
@@ -157,4 +157,4 @@ void smoothCotan(HalfEdgeMesh& m, int iterations, float lambda) {
     smoothImpl(m, iterations, lambda, [&] { return cotanWeights(m); });
 }
 
-} // namespace prism
+} // namespace glue

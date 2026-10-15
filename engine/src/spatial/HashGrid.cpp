@@ -1,6 +1,6 @@
 #include "spatial/HashGrid.h"
 
-namespace prism {
+namespace glue {
 
 uint32_t HashGrid::tableSizeFor(size_t n) {
     uint32_t s = 1024;
@@ -58,4 +58,4 @@ void HashGrid::query(const Vec3& x, float radius, std::vector<uint32_t>& out) co
     forEachNeighbor(x, radius, [&](uint32_t j) { out.push_back(j); });
 }
 
-} // namespace prism
+} // namespace glue

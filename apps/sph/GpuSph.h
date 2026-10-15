@@ -27,10 +27,10 @@ public:
 
 private:
     void bindAll() const;
-    void setUniforms(prism::Shader& s, const Params& p) const;
-    void dispatch(prism::Shader& s, uint32_t threads, uint32_t local = 128) const;
+    void setUniforms(glue::Shader& s, const Params& p) const;
+    void dispatch(glue::Shader& s, uint32_t threads, uint32_t local = 128) const;
 
-    prism::Shader clear_, hash_, scan_, scatter_, density_, force_, integrate_;
+    glue::Shader clear_, hash_, scan_, scatter_, density_, force_, integrate_;
     GLuint pos_[2] = {0, 0}, vel_ = 0, rho_ = 0, velTmp_ = 0, press_ = 0;
     GLuint bucketOf_ = 0, start_ = 0, cursor_ = 0, sorted_ = 0;
     int cur_ = 0;

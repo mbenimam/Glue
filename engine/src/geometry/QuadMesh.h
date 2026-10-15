@@ -17,7 +17,7 @@
 // vertex becomes irregular.
 #include "geometry/HalfEdgeMesh.h"
 
-namespace prism {
+namespace glue {
 
 struct QuadConvertOptions {
     bool crawl = true;
@@ -53,4 +53,4 @@ struct QuadQualityStats {
 };
 QuadQualityStats measureQuads(const HalfEdgeMesh& m);
 
-} // namespace prism
+} // namespace glue

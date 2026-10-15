@@ -1,7 +1,7 @@
 #include "geometry/SpatialGrid.h"
 #include <cfloat>
 
-namespace prism {
+namespace glue {
 
 Vec3 closestPointOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, float w[3]) {
     // Classify p against the Voronoi regions of the vertices, edges and face of the triangle.
@@ -145,4 +145,4 @@ TriangleGrid::Hit TriangleGrid::closest(const Vec3& q) const {
     return best;
 }
 
-} // namespace prism
+} // namespace glue

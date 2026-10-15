@@ -12,7 +12,7 @@
 
 #include "TestFramework.h"
 
-using namespace prism;
+using namespace glue;
 
 namespace {
 // Tiny deterministic generator so the random-operation tests are reproducible.

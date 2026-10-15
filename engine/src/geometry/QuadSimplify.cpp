@@ -7,7 +7,7 @@
 #include <queue>
 #include <thread>
 
-namespace prism {
+namespace glue {
 
 using Clock = std::chrono::steady_clock;
 static double msSince(Clock::time_point t0) {
@@ -847,4 +847,4 @@ double homeometryEnergy(const HalfEdgeMesh& m) {
     return e / (n * mu * mu);
 }
 
-} // namespace prism
+} // namespace glue

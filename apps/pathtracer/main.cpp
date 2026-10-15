@@ -35,7 +35,7 @@
 #include <chrono>
 #include <cstring>
 
-using namespace prism;
+using namespace glue;
 
 namespace {
 
@@ -83,11 +83,11 @@ double nowMs() {
 
 class PathTracer : public Application {
 public:
-    explicit PathTracer(bool bench) : Application(AppConfig{"Prismatic PathTracer", 1600, 900, !bench, false}) {}
+    explicit PathTracer(bool bench) : Application(AppConfig{"Glue PathTracer", 1600, 900, !bench, false}) {}
 
 protected:
     bool onInit(int argc, char** argv) override {
-        ImGui::GetIO().IniFilename = "pathtracer.ini";   // own layout, not ShaderLab's
+        ImGui::GetIO().IniFilename = "pathtracer.ini";   // own layout, not GlueLab's
         assets_ = assetsDir();
         bool spfGiven = false;
         for (int i = 1; i < argc; ++i) {
@@ -148,7 +148,7 @@ protected:
     }
 
     void onUpdate(float) override {
-        // Hot reload of the tracer, like ShaderLab's effects: save pt.comp, see the result.
+        // Hot reload of the tracer, like GlueLab's effects: save pt.comp, see the result.
         if (frame() % 30 == 0) {
             long long s = fileStamp(computePath_);
             if (s && s != computeStamp_) { loadCompute(); reset(); }

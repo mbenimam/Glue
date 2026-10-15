@@ -1,7 +1,7 @@
 #include "scene/Mesh.h"
 #include <vector>
 
-namespace prism {
+namespace glue {
 
 void Mesh::destroy() {
     if (vao_) glDeleteVertexArrays(1, &vao_);
@@ -39,4 +39,4 @@ void Mesh::draw() const {
     glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
 }
 
-} // namespace prism
+} // namespace glue
