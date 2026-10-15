@@ -9,7 +9,8 @@
 //   --bench [model]         print the benchmark tables (docs/quadmesh-benchmarks.md) and exit
 //   --model teapot|bumpy|box|file.obj   --segments N   --target N
 //   --run quads|uniform|adaptive|baseline   (may repeat; applied in order at start-up)
-//   --view shaded|curvature|fitmap|error   --compare   --no-wire
+//   --view shaded|curvature|fitmap|error   --no-wire   --camera yaw pitch distance
+//   --compare [--left quads|uniform|adaptive|baseline]   show that method's result on the left
 #include "core/Application.h"
 #include "core/Log.h"
 #include "geometry/Differential.h"
@@ -186,10 +187,12 @@ static int runBench(const char* only) {
         char line[256];
         auto row = [&](const Result& r, int target) {
             const double dg = r.d.diagonal;
-            std::printf("| %s | %s | %d | %zu | %.1f | %.1f | %.3f / %.3f | %.1f | %.3f | %.3f | %.4f | %.1f |\n",
-                        m->name.c_str(), r.label.c_str(), target, r.q.faces, r.q.percentQuads, r.q.percentRegular,
-                        r.q.meanQuality, r.q.minQuality, r.q.meanAngleDeviation, r.homeo, 100.0 * r.d.hausdorff / dg,
-                        100.0 * 0.5 * (r.d.meanAB + r.d.meanBA) / dg, r.ms);
+            char quad[160] = "- | - | - | -";             // quad-only columns mean nothing for triangles
+            if (r.q.quads)
+                std::snprintf(quad, sizeof quad, "%.1f | %.3f / %.3f | %.1f | %.3f", r.q.percentRegular, r.q.meanQuality,
+                              r.q.minQuality, r.q.meanAngleDeviation, r.homeo);
+            std::printf("| %s | %s | %d | %zu | %.1f | %s | %.3f | %.4f | %.1f |\n", m->name.c_str(), r.label.c_str(), target,
+                        r.q.faces, r.q.percentQuads, quad, 100.0 * r.d.hausdorff / dg, 100.0 * 0.5 * (r.d.meanAB + r.d.meanBA) / dg, r.ms);
             std::fflush(stdout);
         };
         double convertMs = 0;
@@ -341,18 +344,24 @@ protected:
             else if (a == "--segments" && more) segments_ = std::atoi(argv[++i]);
             else if (a == "--target" && more) target_ = std::atoi(argv[++i]);
             else if (a == "--compare") compare_ = true;
+            else if (a == "--left" && more) compareWith_ = (int)methodFromName(argv[++i]);
             else if (a == "--no-wire") wire_ = false;
             else if (a == "--view" && more) {
                 std::string v = argv[++i];
                 view_ = v == "curvature" ? View::Curvature : v == "fitmap" ? View::Fitmap : v == "error" ? View::Error : View::Shaded;
             } else if (a == "--run" && more) {
-                std::string r = argv[++i];
-                runs.push_back(r == "quads" ? Method::Quads : r == "uniform" ? Method::Uniform : r == "baseline" ? Method::Baseline : Method::Adaptive);
+                runs.push_back(methodFromName(argv[++i]));
             }
         }
         modelIndex_ = model == "teapot" ? 0 : model == "bumpy" ? 1 : model == "box" ? 2 : 3;
         if (modelIndex_ == 3) objPath_ = model;
         load(model);
+        for (int i = 1; i + 3 < argc; ++i)
+            if (!std::strcmp(argv[i], "--camera")) {
+                camera_.yaw = (float)std::atof(argv[i + 1]);
+                camera_.pitch = (float)std::atof(argv[i + 2]);
+                camera_.distance = (float)std::atof(argv[i + 3]);
+            }
         for (Method r : runs) apply(r);
         return true;
     }
@@ -386,7 +395,7 @@ protected:
         shader_.bind();
         shader_.set("uViewProj", vp);
         shader_.set("uCameraPos", camera_.position());
-        bool side = compare_ && compareMesh_;
+        const Result* side = leftResult();
         // Side by side along the screen's horizontal, whatever the orbit angle.
         Vec3 right = normalize(cross(camera_.target - camera_.position(), {0, 1, 0}));
         auto drawOne = [&](const PolyMeshGpu& g, float dx) {
@@ -403,8 +412,8 @@ protected:
                 g.drawLines();
             }
         };
-        if (current_) drawOne(gpuMain_, side ? 1.15f : 0.0f);
-        if (side) drawOne(gpuSide_, -1.15f);
+        if (shownResult()) drawOne(gpuMain_, side ? 1.3f : 0.0f);
+        if (side) drawOne(gpuSide_, -1.3f);
         Framebuffer::unbind();
     }
 
@@ -415,13 +424,12 @@ private:
         auto m = loadModel(which, segments_, &err);
         if (!m) { Log::warn("load: " + err); return; }
         model_ = std::move(m);
-        current_.reset();
-        compareMesh_.reset();
-        Result r;
-        r.label = "input triangles";
-        r.mesh = model_->tri;
-        measure(r, *model_);
-        current_ = std::make_unique<Result>(std::move(r));
+        for (auto& r : results_) r.reset();
+        shown_ = -1;
+        input_ = std::make_unique<Result>();
+        input_->label = "input triangles";
+        input_->mesh = model_->tri;
+        measure(*input_, *model_);
         // Slider range follows the model; default target about a quarter of the quads.
         int quads = (int)model_->tri.liveFaces() / 2;
         if (target_ <= 0 || target_ > quads) target_ = std::max(50, quads / 4);
@@ -434,7 +442,7 @@ private:
         hScale_ = h.empty() ? 1.0f : std::max(h[h.size() * 95 / 100], 1e-6f);
         Log::info(model_->name + ": " + std::to_string(model_->tri.liveFaces()) + " triangles, prep " +
                   std::to_string((int)model_->prepMs) + " ms (fitmaps " + std::to_string((int)model_->fit.ms) + " ms)");
-        camera_.distance = compare_ ? 4.6f : 3.0f;
+        camera_.distance = compare_ ? 6.2f : 3.6f;
         dirtyGpu_ = true;
     }
 
@@ -442,10 +450,20 @@ private:
         if (!model_) return;
         Result r = runMethod(*model_, how, target_);
         Log::info(r.label + ": " + std::to_string(r.q.faces) + " faces in " + std::to_string((int)r.ms) + " ms");
-        if (how == Method::Baseline) compareMesh_ = std::make_unique<Result>(std::move(r));
-        else current_ = std::make_unique<Result>(std::move(r));
-        if (how == Method::Baseline && !current_) current_ = std::make_unique<Result>(*compareMesh_);
+        results_[(int)how] = std::make_unique<Result>(std::move(r));
+        // The triangle baseline goes to the left slot when a quad result is on screen.
+        if (how == Method::Baseline && shown_ >= 0 && shown_ != (int)Method::Baseline) compareWith_ = (int)how;
+        else shown_ = (int)how;
         dirtyGpu_ = true;
+    }
+
+    static Method methodFromName(const std::string& r) {
+        return r == "quads" ? Method::Quads : r == "uniform" ? Method::Uniform : r == "baseline" ? Method::Baseline : Method::Adaptive;
+    }
+    const Result* shownResult() const { return shown_ >= 0 && results_[shown_] ? results_[shown_].get() : input_.get(); }
+    const Result* leftResult() const {
+        if (!compare_ || compareWith_ == shown_ || !results_[compareWith_]) return nullptr;
+        return results_[compareWith_].get();
     }
 
     std::vector<Vec3> colorsFor(const Result& r, std::vector<Vec3>& faceColors) const {
@@ -479,8 +497,8 @@ private:
 
     void refreshGpu() {
         std::vector<Vec3> fc;
-        if (current_) { auto vc = colorsFor(*current_, fc); gpuMain_.upload(current_->mesh, vc, fc); }
-        if (compareMesh_) { auto vc = colorsFor(*compareMesh_, fc); gpuSide_.upload(compareMesh_->mesh, vc, fc); }
+        if (const Result* r = shownResult()) { auto vc = colorsFor(*r, fc); gpuMain_.upload(r->mesh, vc, fc); }
+        if (const Result* r = leftResult()) { auto vc = colorsFor(*r, fc); gpuSide_.upload(r->mesh, vc, fc); }
     }
 
     // ---- UI ----
@@ -546,7 +564,16 @@ private:
             if (ImGui::SliderFloat("red at %diag", &errScale_, 0.05f, 2.0f, "%.2f")) dirtyGpu_ = true;
         }
         ImGui::Checkbox("Wireframe", &wire_);
-        if (ImGui::Checkbox("Side by side with baseline", &compare_)) camera_.distance = compare_ ? 4.6f : 3.0f;
+        if (ImGui::Checkbox("Side by side", &compare_)) { camera_.distance = compare_ ? 6.2f : 3.6f; dirtyGpu_ = true; }
+        if (compare_) {
+            const char* methods[] = {"tri -> quad", "uniform quads", "adaptive quads", "triangle QEM"};
+            ImGui::SetNextItemWidth(-60);
+            if (ImGui::Combo("on left", &compareWith_, methods, 4)) dirtyGpu_ = true;
+            ImGui::SetNextItemWidth(-60);
+            int shown = std::max(shown_, 0);
+            if (ImGui::Combo("on right", &shown, methods, 4) && results_[shown]) { shown_ = shown; dirtyGpu_ = true; }
+            ImGui::TextDisabled("run a method once to fill its slot");
+        }
         ImGui::End();
     }
 
@@ -571,7 +598,7 @@ private:
 
     void statsPanel() {
         ImGui::Begin("Stats");
-        for (const Result* r : {current_.get(), compareMesh_.get()}) {
+        for (const Result* r : {shownResult(), leftResult()}) {
             if (!r) continue;
             ImGui::SeparatorText(r->label.c_str());
             if (ImGui::BeginTable(r->label.c_str(), 2, ImGuiTableFlags_SizingStretchProp)) {
@@ -600,8 +627,8 @@ private:
             std::snprintf(buf, sizeof buf, "%s  -  %zu faces", r->label.c_str(), r->q.faces);
             dl->AddText({origin.x + x, origin.y + 10}, IM_COL32(220, 220, 230, 255), buf);
         };
-        if (compare_ && compareMesh_) { caption(compareMesh_.get(), 14); caption(current_.get(), sz.x * 0.5f + 14); }
-        else caption(current_.get(), 14);
+        if (leftResult()) { caption(leftResult(), 14); caption(shownResult(), sz.x * 0.5f + 14); }
+        else caption(shownResult(), 14);
         ImGui::End();
         ImGui::PopStyleVar();
     }
@@ -609,9 +636,10 @@ private:
     Shader shader_;
     Framebuffer fbo_;
     PolyMeshGpu gpuMain_, gpuSide_;
-    OrbitCamera camera_{{0, 0, 0}, 0.5f, 0.35f, 3.0f};
+    OrbitCamera camera_{{0, 0, 0}, 0.6f, 0.45f, 3.6f};
     std::unique_ptr<Model> model_;
-    std::unique_ptr<Result> current_, compareMesh_;
+    std::unique_ptr<Result> input_, results_[4];        // one slot per Method
+    int shown_ = -1, compareWith_ = (int)Method::Baseline;
     View view_ = View::Shaded;
     int modelIndex_ = 0, segments_ = 16, target_ = 0;
     std::string objPath_;

@@ -8,15 +8,17 @@
 //   M  --> trianglesToQuads (QuadMesh.h) --> M0 quads
 //   loop until the target quad count:
 //       pop the quad with the smallest priority      uniform: |shortest diagonal|
-//                                                    adaptive: |d| * S(projection of the centre)
+//                                                    adaptive: |d| * (S(phi(centre)) + b)
+//       adaptive only: skip it when its radius exceeds the M-fitmap there
 //       diagonal collapse (midpoint, projected on M) and cleaning (doublets, singlets)
-//       edge rotations that lower sum |valence - 4| over the hexagon
-//       tangent-space smoothing of the 1-ring, projected back on M
+//       edge rotations that lower sum |valence - ideal| over the hexagon
+//       tangent-space relaxation of the faces around the new vertex, projected back on M
 //       re-key the quads whose geometry changed
 //
 // Invariants kept after every iteration: the half-edge mesh validates (manifold, oriented,
-// one edge per vertex pair), the Euler characteristic and boundary loop count never change,
-// boundary vertices never move, no face flips its normal against its old one.
+// one edge per vertex pair), the Euler characteristic, component and boundary loop counts
+// never change, boundary vertices never move, every vertex lies on M, and no face around a
+// collapse turns its normal by more than 90 degrees.
 #include <vector>
 #include "geometry/HalfEdgeMesh.h"
 #include "geometry/SpatialGrid.h"
