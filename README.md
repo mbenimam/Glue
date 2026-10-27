@@ -109,3 +109,7 @@ GLFW (zlib), Dear ImGui (MIT), glad (generated, public domain / MIT), stb (publi
 ## License
 
 MIT, see [`LICENSE`](LICENSE).
+
+## Interface
+
+A modern ImGui theme (Inter + JetBrains Mono, a palette, rounded geometry, animated switches and sliders) and a GLSL editor with syntax highlighting in GlueLab. How it is built: [docs/ui-theme.md](docs/ui-theme.md).

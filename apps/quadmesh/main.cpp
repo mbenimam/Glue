@@ -21,6 +21,7 @@
 #include "scene/Camera.h"
 #include "scene/MeshData.h"
 #include <imgui.h>
+#include "ui/Theme.h"
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -558,7 +559,7 @@ private:
         const char* names[] = {"Utah teapot", "Bumpy sphere", "Rounded box", "OBJ file"};
         ImGui::SetNextItemWidth(-1);
         ImGui::Combo("##model", &modelIndex_, names, 4);
-        if (modelIndex_ == 0) { ImGui::SetNextItemWidth(-80); ImGui::SliderInt("segments", &segments_, 4, 24); }
+        if (modelIndex_ == 0) { ImGui::SetNextItemWidth(-80); ui::sliderInt("segments", &segments_, 4, 24); }
         if (modelIndex_ == 3) { ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##obj", "path/to/model.obj", &objPath_); }
         static const char* keys[] = {"teapot", "bumpy", "box"};
         if (ImGui::Button("Load", {-1, 0})) load(modelIndex_ < 3 ? keys[modelIndex_] : objPath_);
@@ -573,9 +574,8 @@ private:
     void simplifyPanel() {
         ImGui::Begin("Simplify");
         int maxQ = model_ ? std::max(60, (int)model_->tri.liveFaces() / 2) : 1000;
-        ImGui::TextUnformatted("Target quads");
         ImGui::SetNextItemWidth(-1);
-        ImGui::SliderInt("##target", &target_, 50, maxQ, "%d", ImGuiSliderFlags_Logarithmic);
+        ui::sliderInt("Target quads", &target_, 50, maxQ, "%d", true);
         ImGui::Spacing();
         if (ImGui::Button("Tri -> quad", {-1, 0})) apply(Method::Quads);
         if (ImGui::Button("Simplify: adaptive", {-1, 0})) apply(Method::Adaptive);
@@ -593,7 +593,7 @@ private:
         if (ImGui::Combo("##view", &v, views, 4)) { view_ = (View)v; dirtyGpu_ = true; }
         if (view_ == View::Error) {
             ImGui::SetNextItemWidth(-90);
-            if (ImGui::SliderFloat("red at %diag", &errScale_, 0.05f, 2.0f, "%.2f")) dirtyGpu_ = true;
+            if (ui::slider("red at %diag", &errScale_, 0.05f, 2.0f, "%.2f")) dirtyGpu_ = true;
         }
         ImGui::Checkbox("Wireframe", &wire_);
         if (ImGui::Checkbox("Side by side", &compare_)) { camera_.distance = compare_ ? 6.2f : 3.6f; dirtyGpu_ = true; }
