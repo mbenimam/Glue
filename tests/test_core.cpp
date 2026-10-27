@@ -94,3 +94,30 @@ TEST(core_testShaderToy) {
     CHECK(w.find("mainImage(c, vUv * iResolution.xy)") != std::string::npos);
 }
 
+
+TEST(core_testEffectStages) {
+    const std::string src =
+        "uniform float uA = 1.0;\n"
+        "// @vertex\n"
+        "void mainVertex(inout vec3 p, inout vec3 n, in vec2 uv) { p.y += uA; }\n"
+        "// @fragment\n"
+        "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }\n";
+    EffectParts parts = splitEffect(src);
+    CHECK(parts.hasVertex);
+    // each stage keeps the line count, so driver error lines match the editor
+    CHECK(std::count(parts.vertex.begin(), parts.vertex.end(), '\n') == std::count(src.begin(), src.end(), '\n'));
+    CHECK(std::count(parts.fragment.begin(), parts.fragment.end(), '\n') == std::count(src.begin(), src.end(), '\n'));
+    CHECK(parts.vertex.find("mainVertex") != std::string::npos);
+    CHECK(parts.vertex.find("mainImage") == std::string::npos);
+    CHECK(parts.fragment.find("mainImage") != std::string::npos);
+    CHECK(parts.fragment.find("mainVertex") == std::string::npos);
+    // a file without markers is all fragment
+    EffectParts plain = splitEffect("void mainImage(out vec4 c, in vec2 p){c=vec4(1);}\n");
+    CHECK(!plain.hasVertex);
+    // the vertex user code lands in the scene vertex template
+    std::string w = wrapSceneVertex("A\n/*GLUE_USER_DECLS*/\nB\n/*GLUE_USER_CALL*/\n", parts.vertex);
+    CHECK(w.find("mainVertex(p, n, aUv);") != std::string::npos);
+    CHECK(w.find("#line 1") != std::string::npos);
+    std::string none = wrapSceneVertex("A\n/*GLUE_USER_DECLS*/\nB\n/*GLUE_USER_CALL*/\n", "  \n");
+    CHECK(none.find("mainVertex") == std::string::npos);
+}
